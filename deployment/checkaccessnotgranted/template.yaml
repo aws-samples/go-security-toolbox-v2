@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  checkaccessnotgranted
+  
+  AWS SAM Template for to deploy Check Access Not Granted Solution.
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 600
+    MemorySize: 256
+
+Resources:
+  AWSConfigRuleLambda:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Metadata:
+      BuildMethod: go1.x
+    Properties:
+      FunctionName: checkaccessnotgranted-iamPolicyPatrol
+      CodeUri: ../../cmd/checkaccessnotgranted
+      Handler: bootstrap
+      Runtime: provided.al2023
+      ReservedConcurrentExecutions: 1
+      Architectures:
+        - arm64
+      Environment: # More info about Env Vars: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#environment-object
+        Variables:
+          CONFIG_FILE_BUCKET_NAME: iam-policy-patrol-placeholder
+          CONFIG_FILE_KEY: checkaccessnotgranted-config.json
+      Policies:
+        Statement:
+          - Sid: "cloudWatchLogs"
+            Effect: "Allow"
+            Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource: "*"
+
+          - Sid: "s3BucketAccess"
+            Effect: "Allow"
+            Action: 
+              - "s3:GetObject"
+              - "s3:PutObject"
+            Resource: "*"
+
+          - Sid: "iamActions"
+            Effect: "Allow"
+            Action: 
+              - "iam:ListUsers"
+              - "iam:ListAttachedUserPolicies"
+              - "iam:ListUserPolicies"
+              - "iam:GetUserPolicy"
+              - "iam:ListRoles"
+              - "iam:ListAttachedRolePolicies"
+              - "iam:ListRolePolicies"
+              - "iam:GetRolePolicy"
+              - "iam:GetPolicy"
+              - "iam:GetPolicyVersion"
+              - "access-Analyzer:CheckAccessNotGranted"
+            Resource: "*"
+
+          - Sid: "stsActions"
+            Effect: "Allow"
+            Action: 
+              - "sts:AssumeRole" 
+            Resource: "*"
+
+          - Sid: "configActions"
+            Effect: "Allow"
+            Action: 
+              - "config:PutEvaluations"
+            Resource: "*" 
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AWSConfigRuleLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: config.amazonaws.com
+   
+  CustomConfigRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: checkAccessNotGranted-iamPolicyPatrol
+      Description: Scans IAM principals to see if they contain any restricted actions specified in config file
+      Source:
+        SourceIdentifier: !GetAtt AWSConfigRuleLambda.Arn
+        Owner: CUSTOM_LAMBDA
+        SourceDetails:
+          - EventSource: aws.config
+            MessageType: ScheduledNotification
+      MaximumExecutionFrequency: TwentyFour_Hours
+
+Outputs:
+  AWSConfigRuleLambda:
+    Description: "Lambda Function ARN"
+    Value: !GetAtt AWSConfigRuleLambda.Arn

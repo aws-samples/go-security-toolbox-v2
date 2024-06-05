@@ -1,0 +1,89 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  orphan policy finder
+  
+  AWS SAM template to deploy Orphan Policy Finder Solution.
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 600
+    MemorySize: 256
+
+Resources:
+  AWSConfigRuleLambda:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Metadata:
+      BuildMethod: go1.x
+    Properties:
+      FunctionName: orphanPolicyFinder-iamPolicyPatrol
+      CodeUri: ../../cmd/orphanpolicyfinder
+      Handler: bootstrap
+      Runtime: provided.al2023
+      ReservedConcurrentExecutions: 1
+      Architectures:
+        - arm64
+      Environment: # More info about Env Vars: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#environment-object
+        Variables:
+          CONFIG_FILE_BUCKET_NAME: iam-policy-patrol-placeholder
+          CONFIG_FILE_KEY: orphanpolicyfinder-config.json
+      Policies:
+        Statement:
+          - Sid: "cloudWatchLogs"
+            Effect: "Allow"
+            Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource: "*"
+
+          - Sid: "s3BucketAccess"
+            Effect: "Allow"
+            Action: 
+              - "s3:GetObject"
+              - "s3:PutObject"
+            Resource: "*"
+
+          - Sid: "iamActions"
+            Effect: "Allow"
+            Action: 
+              - "iam:ListPolicies"
+            Resource: "*"
+
+          - Sid: "stsActions"
+            Effect: "Allow"
+            Action: 
+              - "sts:AssumeRole" 
+            Resource: "*"
+
+          - Sid: "configActions"
+            Effect: "Allow"
+            Action: 
+              - "config:PutEvaluations"
+            Resource: "*"      
+  
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AWSConfigRuleLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: config.amazonaws.com
+  
+  CustomConfigRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: orphanPolicyFinder-iamPolicyPatrol
+      Description: Checks for orphan IAM policies in your account
+      Source:
+        SourceIdentifier: !GetAtt AWSConfigRuleLambda.Arn
+        Owner: CUSTOM_LAMBDA
+        SourceDetails:
+          - EventSource: aws.config
+            MessageType: ScheduledNotification
+      MaximumExecutionFrequency: TwentyFour_Hours
+
+Outputs:
+  AWSConfigRuleLambda:
+    Description: "Lambda Function ARN"
+    Value: !GetAtt AWSConfigRuleLambda.Arn

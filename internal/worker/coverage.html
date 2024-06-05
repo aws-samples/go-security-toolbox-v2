@@ -1,0 +1,1744 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>worker: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/worker/configevaluationworker.go (81.5%)</option>
+				
+				<option value="file1">github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/worker/csvworker.go (84.2%)</option>
+				
+				<option value="file2">github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/worker/custompolicyscanworker.go (94.7%)</option>
+				
+				<option value="file3">github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/worker/orphanpolicyworker.go (91.7%)</option>
+				
+				<option value="file4">github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/worker/worker.go (97.1%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">package worker
+
+import (
+        "context"
+        "errors"
+        "log"
+        "sync"
+        "time"
+
+        "github.com/aws/aws-sdk-go-v2/aws"
+        "github.com/aws/aws-sdk-go-v2/service/configservice"
+        configservicetypes "github.com/aws/aws-sdk-go-v2/service/configservice/types"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/configserviceapi"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/sdkclientmgr"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/shared"
+)
+
+type ConfigEvaluationWorker struct {
+        maxBatchSize            int
+        accountId               string // account id to send config evaluations to
+        configEvaluations       []configservicetypes.Evaluation
+        resultToken             string              // result token for sending aws config evaluations
+        testMode                bool                // config service boolean for testing
+        csvWorkerRequestChannel chan interface{}    // channel to send request to csv worker
+        csvWorkerWg             *sync.WaitGroup     // wait group for csv worker
+        csvWorkerEnabled        bool                // boolean to enable csv worker for writing results to local filesystem of s3
+        outputConfiguration     OutputConfiguration // output configuration for csv worker
+        Worker                  Worker              // worker interface
+}
+
+type ConfigEvaluationWorkerConfig struct {
+        AccountId        string
+        ResultToken      string
+        TestMode         bool
+        CsvWorkerEnabled bool
+        CsvWorkerConfig  CsvWorkerConfig
+        WorkerConfig     WorkerConfig
+}
+
+type ConfigEvaluationWorkerRequest struct {
+        ConfigEvaluation configservicetypes.Evaluation
+}
+
+func NewConfigEvaluationWorker(config ConfigEvaluationWorkerConfig) (*ConfigEvaluationWorker, error) <span class="cov8" title="1">{
+
+        // initalize worker interface
+        worker, err := NewWorker(config.WorkerConfig)
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, errors.New("invalid worker config: " + err.Error())
+        }</span>
+
+        // if csv worker is enabled, create a new csv worker
+        <span class="cov8" title="1">if config.CsvWorkerEnabled </span><span class="cov8" title="1">{
+                _, err := NewCSVWorker(config.CsvWorkerConfig)
+                if err != nil </span><span class="cov8" title="1">{
+                        return nil, errors.New("invalid csv worker config: " + err.Error())
+                }</span>
+        }
+
+        // validate aws account id
+        <span class="cov8" title="1">if !shared.IsValidAwsAccountId(config.AccountId) </span><span class="cov8" title="1">{
+                log.Printf("invalid aws account id: %s", config.AccountId)
+                return nil, errors.New("invalid aws account id")
+        }</span>
+
+        // check that result token is not empty if test mode is false
+        <span class="cov8" title="1">if !config.TestMode &amp;&amp; config.ResultToken == "" </span><span class="cov8" title="1">{
+                log.Printf("test mode is set to [%v] and result token is not set\n", config.TestMode)
+                return nil, errors.New("invalid result token")
+        }</span>
+
+        // create csv worker
+        <span class="cov8" title="1">configEvaluationWorker := &amp;ConfigEvaluationWorker{
+                maxBatchSize:            100,
+                accountId:               config.AccountId,
+                configEvaluations:       []configservicetypes.Evaluation{},
+                resultToken:             config.ResultToken,
+                testMode:                config.TestMode,
+                csvWorkerEnabled:        config.CsvWorkerEnabled,
+                csvWorkerRequestChannel: config.CsvWorkerConfig.WorkerConfig.RequestChan,
+                csvWorkerWg:             config.CsvWorkerConfig.WorkerConfig.Wg,
+                outputConfiguration:     config.CsvWorkerConfig.OutputConfig,
+                Worker:                  worker,
+        }
+
+        worker.SetRequestHandler(configEvaluationWorker) // set request handler
+        worker.SetFinalizer(configEvaluationWorker)      // set finalizer
+
+        return configEvaluationWorker, nil</span>
+
+}
+
+func (cew *ConfigEvaluationWorker) Handle(params interface{}) <span class="cov8" title="1">{
+        errorChan := cew.Worker.GetErrorChannel()           // get error channel
+        csvWorkerRequestChan := cew.csvWorkerRequestChannel // get csv worker request channel
+        resultToken := cew.resultToken                      // get result token
+        configEvaluationBatch := cew.configEvaluations      // get config evaluation batch
+        awsClientMgr := cew.Worker.GetSDKClientMgr()        // get aws client manager
+
+        client, _ := awsClientMgr.GetSDKClient(cew.accountId, sdkclientmgr.ConfigService) // retrieve aws config client from client map
+        configClient := client.(configserviceapi.ConfigServiceApi)                        // type assert to aws config client type
+
+        request := params.(ConfigEvaluationWorkerRequest) // type assert request to config evaluation worker request
+        configEvaluation := request.ConfigEvaluation      // get config evaluation from request
+
+        configEvaluationBatch = append(configEvaluationBatch, configEvaluation) // append config evaluation to config evaluation batch
+
+        // if csv worker is enabled, send request to csv worker channel
+        if cew.csvWorkerEnabled </span><span class="cov8" title="1">{
+                csvRecord := []string{
+                        *configEvaluation.ComplianceResourceId,
+                        *configEvaluation.ComplianceResourceType,
+                        string(configEvaluation.ComplianceType),
+                        *configEvaluation.Annotation,
+                        configEvaluation.OrderingTimestamp.Format(time.RFC3339),
+                }
+                csvWorkerRequestChan &lt;- CsvWorkerRequest{
+                        CsvRecord: csvRecord,
+                }
+        }</span>
+
+        // if the length is max batch size, send to aws config service
+        <span class="cov8" title="1">if len(configEvaluationBatch) == cew.maxBatchSize </span><span class="cov0" title="0">{
+                _, err := configClient.PutEvaluations(context.Background(), &amp;configservice.PutEvaluationsInput{
+                        Evaluations: configEvaluationBatch,
+                        ResultToken: aws.String(resultToken),
+                        TestMode:    cew.testMode,
+                })
+                if err != nil </span><span class="cov0" title="0">{
+                        errorChan &lt;- err // send error to error channel
+                }</span>
+                <span class="cov0" title="0">log.Printf("worker [%v] successfully sent [%v] aws config evaluations\n", cew.Worker.GetId(), cew.maxBatchSize)
+                cew.configEvaluations = []configservicetypes.Evaluation{}</span> // clear config evaluation batch
+        }
+
+}
+
+func (cew *ConfigEvaluationWorker) Finalize() <span class="cov8" title="1">{
+        log.Printf("finalizing worker [%v]\n", cew.Worker.GetId())
+        errorChan := cew.Worker.GetErrorChannel()                                         // get error channel
+        awsClientMgr := cew.Worker.GetSDKClientMgr()                                      // get aws client manager
+        client, _ := awsClientMgr.GetSDKClient(cew.accountId, sdkclientmgr.ConfigService) // retrieve aws config client from client map
+        configClient := client.(configserviceapi.ConfigServiceApi)                        // type assert to aws config client type
+        csvWorkerWg := cew.csvWorkerWg                                                    // get csv worker wait group
+        csvWorkerRequestchannel := cew.csvWorkerRequestChannel
+
+        // close csv worker request channel if exists
+        if csvWorkerRequestchannel != nil </span><span class="cov8" title="1">{
+                close(csvWorkerRequestchannel)
+        }</span>
+
+        // send any remaining config evaluations to aws config service
+        <span class="cov8" title="1">if len(cew.configEvaluations) &gt; 0 </span><span class="cov0" title="0">{
+                _, err := configClient.PutEvaluations(context.Background(), &amp;configservice.PutEvaluationsInput{
+                        Evaluations: cew.configEvaluations,
+                        ResultToken: aws.String(cew.resultToken),
+                        TestMode:    cew.testMode,
+                })
+                if err != nil </span><span class="cov0" title="0">{
+                        errorChan &lt;- err // send error to error channel
+                }</span>
+                <span class="cov0" title="0">log.Printf("worker [%v] successfully sent [%v] aws config evaluations\n", cew.Worker.GetId(), len(cew.configEvaluations))
+                cew.configEvaluations = []configservicetypes.Evaluation{}</span> // clear config evaluation batch
+        }
+
+        // wait for csv worker to finish if exists
+        <span class="cov8" title="1">if csvWorkerWg != nil </span><span class="cov8" title="1">{
+                csvWorkerWg.Wait()
+        }</span>
+
+        <span class="cov8" title="1">log.Printf("worker [%v] successfully finalized\n", cew.Worker.GetId())</span>
+}
+</pre>
+		
+		<pre class="file" id="file1" style="display: none">package worker
+
+import (
+        "bytes"
+        "context"
+        "encoding/csv"
+        "errors"
+        "log"
+        "os"
+        "path/filepath"
+
+        "github.com/aws/aws-sdk-go-v2/aws"
+        "github.com/aws/aws-sdk-go-v2/service/s3"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/s3api"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/sdkclientmgr"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/shared"
+)
+
+type _CSVWorker struct {
+        accountId    string              // account id to use when writing to s3
+        records      [][]string          // records to write to csv
+        buffer       *bytes.Buffer       // buffer for storing bytes
+        csvWriter    *csv.Writer         // csv writer for writing to buffer
+        outputConfig OutputConfiguration // output configuration for writing files to s3 or local filesystem
+        Worker       Worker              // worker interface
+}
+
+type CsvWorkerConfig struct {
+        AccountId    string       // account id to use when writing to s3
+        WorkerConfig WorkerConfig // worker configuration
+        OutputConfig OutputConfiguration
+}
+
+type OutputConfiguration struct {
+        Headers    []string // headers for csv file
+        Filename   string   // name of file to be written
+        Prefix     string   // s3 prefix to use when writing to s3
+        BucketName string   // name of s3 bucket
+        WriteLocal bool     // write to local filesystem
+        Writes3    bool     // write to s3
+}
+
+type CsvWorkerRequest struct {
+        CsvRecord []string // string to write to csv file
+}
+
+// create new csv worker
+func NewCSVWorker(config CsvWorkerConfig) (*_CSVWorker, error) <span class="cov8" title="1">{
+        if !shared.IsValidAwsAccountId(config.AccountId) </span><span class="cov8" title="1">{
+                log.Printf("invalid account id [%v]\n", config.AccountId)
+                return nil, errors.New("invalid account id")
+        }</span>
+
+        // check for valid ouptut configuration
+        <span class="cov8" title="1">if !config.OutputConfig.WriteLocal &amp;&amp; !config.OutputConfig.Writes3 </span><span class="cov8" title="1">{
+                return nil, errors.New("invalid output configuration. writing to S3 &amp; local file system set to false")
+        }</span>
+        <span class="cov8" title="1">if config.OutputConfig.Writes3 &amp;&amp; config.OutputConfig.BucketName == "" </span><span class="cov8" title="1">{
+                return nil, errors.New("invalid output configuration. bucket name is empty")
+        }</span>
+        <span class="cov8" title="1">if config.OutputConfig.Filename == "" </span><span class="cov8" title="1">{
+                return nil, errors.New("invalid output configuration. filename is empty")
+        }</span>
+        <span class="cov8" title="1">if len(config.OutputConfig.Headers) == 0 </span><span class="cov8" title="1">{
+                return nil, errors.New("invalid output configuration. header is empty")
+        }</span>
+
+        // create worker interface
+        <span class="cov8" title="1">worker, err := NewWorker(config.WorkerConfig)
+        // return errors
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, errors.New("invalid worker config : " + err.Error())
+        }</span>
+
+        <span class="cov8" title="1">records := [][]string{}            // initialize records to empty,
+        buffer := new(bytes.Buffer)        // create new buffer
+        csvWriter := csv.NewWriter(buffer) // create new csv writer that write to buffer
+
+        // write headers to csv buffer
+        if err := csvWriter.Write(config.OutputConfig.Headers); err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov8" title="1">csvWorker := &amp;_CSVWorker{
+                records:      records,
+                buffer:       buffer,
+                csvWriter:    csvWriter,
+                accountId:    config.AccountId,
+                outputConfig: config.OutputConfig,
+                Worker:       worker,
+        }
+
+        worker.SetRequestHandler(csvWorker) // set csv worker request handler
+        worker.SetFinalizer(csvWorker)
+        return csvWorker, nil</span>
+}
+
+// handle requests
+func (csvWorker *_CSVWorker) Handle(request interface{}) <span class="cov8" title="1">{
+        errorChan := csvWorker.Worker.GetErrorChannel()       // get error channel
+        req := request.(CsvWorkerRequest)                     // type assert to csv worker request type
+        record := req.CsvRecord                               // get record
+        csvWorker.records = append(csvWorker.records, record) // append record to records
+        // write record to buffer, send error to error channel if present
+        if err := csvWorker.csvWriter.Write(record); err != nil </span><span class="cov0" title="0">{
+                errorChan &lt;- err // send error to error channel
+        }</span>
+}
+
+// finalize processing
+func (csvWorker *_CSVWorker) Finalize() <span class="cov8" title="1">{
+        errorChan := csvWorker.Worker.GetErrorChannel() // get error channel
+        csvWriter := csvWorker.csvWriter                // get csv writer
+        // flush csv writer
+        csvWriter.Flush()
+
+        // check for errors
+        if err := csvWriter.Error(); err != nil </span><span class="cov0" title="0">{
+                errorChan &lt;- err // send error to error channel
+        }</span>
+        <span class="cov8" title="1">finalBytes := csvWorker.buffer.Bytes() // get final bytes
+
+        // write to local file system if specified in output configuration
+        if csvWorker.outputConfig.WriteLocal </span><span class="cov8" title="1">{
+                log.Printf("writing to file [%v]\n", csvWorker.outputConfig.Filename)
+                file, err := os.Create(csvWorker.outputConfig.Filename)
+                if err != nil </span><span class="cov0" title="0">{
+                        errorChan &lt;- err // send error to error channel
+                        log.Printf("error creating file [%v]\n", err.Error())
+                }</span>
+                <span class="cov8" title="1">defer file.Close()
+
+                _, err = file.Write(finalBytes)
+                if err != nil </span><span class="cov0" title="0">{
+                        errorChan &lt;- err // send error to error channel
+                        log.Printf("error writing to file [%v]\n", err.Error())
+                }</span>
+                <span class="cov8" title="1">log.Printf("finished writing to file [%v]\n", csvWorker.outputConfig.Filename)</span>
+        }
+
+        // write to s3 if specified in output configuration
+        <span class="cov8" title="1">if csvWorker.outputConfig.Writes3 </span><span class="cov8" title="1">{
+                fullObjName := filepath.Join(csvWorker.outputConfig.Prefix, csvWorker.outputConfig.Filename)
+                log.Printf("writing to s3 [%v]\n", fullObjName)
+
+                awsClientMgr := csvWorker.Worker.GetSDKClientMgr() // get aws client manager
+                client, _ := awsClientMgr.GetSDKClient(csvWorker.accountId, sdkclientmgr.S3Service)
+                s3Client := client.(s3api.S3Api) // type assert to s3 sdk client
+                _, err := s3Client.PutObject(context.Background(), &amp;s3.PutObjectInput{
+                        Bucket: aws.String(csvWorker.outputConfig.BucketName),
+                        Key:    aws.String(fullObjName),
+                        Body:   bytes.NewReader(finalBytes),
+                })
+                if err != nil </span><span class="cov0" title="0">{
+                        errorChan &lt;- err // send error to error channel
+                        log.Printf("error writing to s3 [%v]\n", err.Error())
+                }</span>
+        }
+}
+</pre>
+		
+		<pre class="file" id="file2" style="display: none">package worker
+
+import (
+        "context"
+        "errors"
+        "log"
+        "net/url"
+        "strings"
+        "sync"
+        "time"
+
+        "github.com/aws/aws-sdk-go-v2/aws"
+        "github.com/aws/aws-sdk-go-v2/service/accessanalyzer"
+        accessAnalyzerTypes "github.com/aws/aws-sdk-go-v2/service/accessanalyzer/types"
+        configServiceTypes "github.com/aws/aws-sdk-go-v2/service/configservice/types"
+        "github.com/aws/aws-sdk-go-v2/service/iam"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/accessanalyzerapi"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/cache"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/iamapi"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/shared"
+)
+
+// interface for an iam identity.  This will help process the policies in a testabale manner
+type IamIdentity interface {
+        getIdentityType() string
+        getIdentityName() string
+        getIdentityArn() string
+        processPolicyCompliance(ctx context.Context, input ProcessPolicyComplianceInput) error
+}
+
+type _IamIdentity struct {
+        IdentityType string // type of iam principal "user || role"
+        Arn          string // arn of iam principal
+        Name         string // name of iam principal
+}
+
+type IamIdentityConfig struct {
+        IdentityType string // type of iam principal "user || role"
+        Arn          string // arn of iam principal
+        Name         string // name of iam principal
+}
+
+// create new iam identity
+func NewIamIdentity(config IamIdentityConfig) (IamIdentity, error) <span class="cov8" title="1">{
+        // perform nil checks
+        if config.IdentityType == "" || config.Arn == "" || config.Name == "" </span><span class="cov8" title="1">{
+                return nil, errors.New("error creating iam identity. required field(s) are nil")
+        }</span>
+        <span class="cov8" title="1">return &amp;_IamIdentity{
+                IdentityType: config.IdentityType,
+                Arn:          config.Arn,
+                Name:         config.Name,
+        }, nil</span>
+}
+
+type ProcessPolicyComplianceInput struct {
+        AccountId            string                              // aws account id
+        RestrictedActions    []string                            // restricted actions to scan policies from
+        EventTime            time.Time                           // time of event
+        IamIdentity          IamIdentity                         // iam identity to process
+        ErrorChan            chan&lt;- error                        // write only channel for errors
+        ComplianceResults    chan interface{}                    // channel to collect results from each individual policy associated to an iam principal
+        ConfigEvaluationChan chan interface{}                    // channel to send aws config evaluation
+        IamApi               iamapi.IamApi                       // iam api interface
+        Accessanalyzerapi    accessanalyzerapi.AccessAnalyzerApi // access analyzer api interface
+        Cache                cache.CustomPolicyScanResultsCache  // cache for accessing custom policy scan results
+        ErrorHandler         handler                             // error handler
+}
+
+// get identity type
+func (i *_IamIdentity) getIdentityType() string <span class="cov8" title="1">{
+        return i.IdentityType
+}</span>
+
+// get identity name
+func (i *_IamIdentity) getIdentityName() string <span class="cov8" title="1">{
+        return i.Name
+}</span>
+
+// get identity arn
+func (i *_IamIdentity) getIdentityArn() string <span class="cov8" title="1">{
+        return i.Arn
+}</span>
+
+// process policy compliance
+func (i *_IamIdentity) processPolicyCompliance(ctx context.Context, input ProcessPolicyComplianceInput) error <span class="cov8" title="1">{
+        // perform nil checks for required fields
+        if len(input.RestrictedActions) == 0 || input.ErrorChan == nil || input.ComplianceResults == nil || input.AccountId == "" ||
+                input.Accessanalyzerapi == nil || input.IamApi == nil || input.ErrorHandler == nil || input.ConfigEvaluationChan == nil </span><span class="cov0" title="0">{
+                return errors.New("error processing policy compliance. required field(s) are nil")
+        }</span>
+
+        <span class="cov8" title="1">var (
+                done            = make(chan bool)
+                batch           []CustomPolicyScanResult
+                inlinePolicyWg  = new(sync.WaitGroup)
+                managedPolicyWg = new(sync.WaitGroup)
+                resultWg        = new(sync.WaitGroup)
+        )
+
+        // increment wait groups for go routines
+        inlinePolicyWg.Add(1)
+        managedPolicyWg.Add(1)
+        resultWg.Add(1)
+
+        // batch results until go routines signal completion
+        go func() </span><span class="cov8" title="1">{
+                defer resultWg.Done()
+                for </span><span class="cov8" title="1">{
+                        select </span>{
+                        case result := &lt;-input.ComplianceResults:<span class="cov8" title="1">
+                                </span><span class="cov8" title="1">{
+                                        batch = append(batch, result.(CustomPolicyScanResult))
+                                }</span>
+                        case &lt;-done:<span class="cov8" title="1">
+                                </span><span class="cov8" title="1">{
+                                        log.Printf("managed and inline policy compliance completed\n")
+                                        return
+                                }</span>
+                        }
+                }
+        }()
+
+        // process inline and managed policy compliance in go routines
+        <span class="cov8" title="1">go processInlinePolicyCompliance(ctx, inlinePolicyWg, input)
+        go processManagedPolicyCompliance(ctx, managedPolicyWg, input)
+
+        // wait for go routines to complete and signal completion
+        go func() </span><span class="cov8" title="1">{
+                inlinePolicyWg.Wait()
+                managedPolicyWg.Wait()
+                done &lt;- true
+        }</span>()
+
+        <span class="cov8" title="1">resultWg.Wait() // wait for batch to complete
+        log.Printf("batch is completed\n")
+
+        // create aws config evaluation
+        evaluation, _ := createConfigEvaluation(createConfigEvaluationInput{
+                results:                batch,
+                orderTimeStamp:         input.EventTime,
+                complianceResourceType: input.IamIdentity.getIdentityType(),
+                configEvaluationChan:   input.ComplianceResults,
+                errorChan:              input.ErrorChan,
+        })
+
+        input.ConfigEvaluationChan &lt;- evaluation // send config evaluation
+        log.Printf("config evaluation for [%v] is completed", input.IamIdentity.getIdentityArn())
+
+        return nil</span>
+}
+
+type createConfigEvaluationInput struct {
+        results                []CustomPolicyScanResult
+        orderTimeStamp         time.Time
+        complianceResourceType string
+        configEvaluationChan   chan&lt;- interface{}
+        errorChan              chan&lt;- error
+}
+
+func createConfigEvaluation(input createConfigEvaluationInput) (configServiceTypes.Evaluation, error) <span class="cov8" title="1">{
+        var (
+                currentComplianceStatus = configServiceTypes.ComplianceTypeCompliant // set to compliant by default
+                annotation              = []string{}                                 // aggregating all reasons &amp; messages for each result
+                complianceResourceId    = ""
+        )
+
+        for index, result := range input.results </span><span class="cov8" title="1">{
+                if index == 0 </span><span class="cov8" title="1">{
+                        complianceResourceId = result.ResourceArn // save resource id for first entry
+                }</span>
+                <span class="cov8" title="1">switch string(result.Compliance) </span>{
+                case "NON_COMPLIANT":<span class="cov8" title="1">
+                        </span><span class="cov8" title="1">{
+                                currentComplianceStatus = configServiceTypes.ComplianceTypeNonCompliant
+                                annotation = append(annotation, result.Reasons...) // add reasons to annotation
+                        }</span>
+                case "COMPLIANT":<span class="cov8" title="1">
+                        </span><span class="cov8" title="1">{
+                                annotation = append(annotation, result.Message) // add message to annotation
+                        }</span>
+                default:<span class="cov0" title="0">
+                        </span><span class="cov0" title="0">{
+                                return configServiceTypes.Evaluation{}, errors.New("error while creating config evaluation. invalid compliance type")
+                        }</span>
+                }
+        }
+        <span class="cov8" title="1">return configServiceTypes.Evaluation{
+                ComplianceResourceId:   aws.String(complianceResourceId),
+                ComplianceResourceType: aws.String(input.complianceResourceType),
+                ComplianceType:         currentComplianceStatus,
+                Annotation:             aws.String(strings.Join(annotation, "\n")),
+                OrderingTimestamp:      aws.Time(input.orderTimeStamp),
+        }, nil</span>
+}
+
+func processInlinePolicyCompliance(ctx context.Context, wg *sync.WaitGroup, input ProcessPolicyComplianceInput) <span class="cov8" title="1">{
+        defer wg.Done() // decrement wait group
+
+        // process iam identity based on type
+        switch input.IamIdentity.getIdentityType() </span>{
+        case shared.AwsIamUser:<span class="cov8" title="1">
+                </span><span class="cov8" title="1">{
+                        // process inline policies for iam user
+                        processInlinePoliciesForIamUser(ctx, input)
+                        log.Printf("inline policy compliance completed for [%v]\n", input.IamIdentity.getIdentityArn())
+                        return
+                }</span>
+        case shared.AwsIamRole:<span class="cov8" title="1">
+                </span><span class="cov8" title="1">{
+                        // process inline policies for iam role
+                        processInlinePoliciesForIamRole(ctx, input)
+                        log.Printf("inline policy compliance completed for [%v]\n", input.IamIdentity.getIdentityArn())
+                        return
+                }</span>
+        default:<span class="cov0" title="0">
+                </span><span class="cov0" title="0">{
+                        log.Printf("unknown identity type\n")
+                }</span>
+        }
+}
+
+func processInlinePoliciesForIamUser(ctx context.Context, input ProcessPolicyComplianceInput) <span class="cov8" title="1">{
+
+        listUserPoliciesPaginator := iam.NewListUserPoliciesPaginator(input.IamApi, &amp;iam.ListUserPoliciesInput{
+                UserName: aws.String(input.IamIdentity.getIdentityName()),
+        })
+        for listUserPoliciesPaginator.HasMorePages() </span><span class="cov8" title="1">{
+                listUserPoliciesOutput, err := listUserPoliciesPaginator.NextPage(ctx)
+                if err != nil </span><span class="cov8" title="1">{
+                        input.ErrorChan &lt;- err
+                        log.Printf("error while listing inline policies for %v. %v", input.IamIdentity.getIdentityArn(), err)
+                        return
+                }</span>
+
+                <span class="cov8" title="1">for _, policyName := range listUserPoliciesOutput.PolicyNames </span><span class="cov8" title="1">{
+                        // get inline policy document
+                        getUserPolicyOutput, err := input.IamApi.GetUserPolicy(ctx, &amp;iam.GetUserPolicyInput{
+                                PolicyName: aws.String(policyName),
+                                UserName:   aws.String(input.IamIdentity.getIdentityName()),
+                        })
+                        if err != nil </span><span class="cov8" title="1">{
+                                input.ErrorHandler.Handle(handleCustomPolicyscanErrorInput{
+                                        err: CustomPolicyScanError{
+                                                IAMPrincipalArn:    input.IamIdentity.getIdentityArn(),
+                                                Message:            err.Error(),
+                                                PolicyDocumentName: policyName,
+                                        },
+                                        errorChan:                   input.ErrorChan,
+                                        customPolicyScanResultsChan: input.ComplianceResults,
+                                        cache:                       input.Cache,
+                                        complianceResultInput: complianceResultInput{
+                                                compliance:  configServiceTypes.ComplianceTypeNonCompliant,
+                                                reasons:     nil,
+                                                message:     err.Error(),
+                                                policyName:  policyName,
+                                                resourceArn: input.IamIdentity.getIdentityArn(),
+                                        },
+                                })
+                                continue</span>
+                        }
+
+                        // check cache first
+                        <span class="cov8" title="1">if input.Cache != nil </span><span class="cov8" title="1">{
+                                result, ok := input.Cache.Get(cache.CustomPolicyScanCacheKey{
+                                        PolicyName: policyName,
+                                        AccountID:  input.AccountId,
+                                })
+                                if ok </span><span class="cov8" title="1">{
+                                        // send result to channel
+                                        log.Printf("cache hit for " + policyName)
+                                        cacheResult := result.(cache.CustomPolicyScanCacheResult)
+                                        customPolicyScanResult := CustomPolicyScanResult{
+                                                PolicyDocumentName: policyName,
+                                                ResourceArn:        input.IamIdentity.getIdentityArn(),
+                                                Compliance:         cacheResult.Compliance,
+                                                Reasons:            cacheResult.Reasons,
+                                                Message:            cacheResult.Message,
+                                        }
+                                        input.ComplianceResults &lt;- customPolicyScanResult
+                                        log.Printf("sent compliance result for " + customPolicyScanResult.PolicyDocumentName + " to results channel")
+                                        continue</span>
+                                }
+                                <span class="cov8" title="1">log.Printf("cache miss for " + policyName)</span>
+                        }
+
+                        // decode policy document
+                        <span class="cov8" title="1">decodedPolicyDocument, _ := url.QueryUnescape(*getUserPolicyOutput.PolicyDocument)
+
+                        // check policy compliance
+                        result, _ := isCompliant(isCompliantInput{
+                                ctx:                  ctx,
+                                accessAnalyzerClient: input.Accessanalyzerapi,
+                                policyDocument:       decodedPolicyDocument,
+                                restrictedActions:    input.RestrictedActions,
+                                policyDocumentName:   policyName,
+                                resourceArn:          input.IamIdentity.getIdentityArn(),
+                        })
+
+                        // write result to cache
+                        if input.Cache != nil </span><span class="cov8" title="1">{
+                                _ = input.Cache.Set(cache.CustomPolicyScanCacheKey{
+                                        PolicyName: policyName,
+                                        AccountID:  input.AccountId,
+                                }, cache.CustomPolicyScanCacheResult{
+                                        Compliance: result.Compliance,
+                                        Reasons:    result.Reasons,
+                                        Message:    result.Message,
+                                })
+                                input.ComplianceResults &lt;- result // send result to channel
+                                continue</span>
+                        }
+                        <span class="cov8" title="1">input.ComplianceResults &lt;- result // send result to channel
+                        log.Printf("sent compliance result for " + result.PolicyDocumentName + " to result channel")
+                        continue</span>
+                }
+        }
+}
+
+func processInlinePoliciesForIamRole(ctx context.Context, input ProcessPolicyComplianceInput) <span class="cov8" title="1">{
+        listRolePoliciesPaginator := iam.NewListRolePoliciesPaginator(input.IamApi, &amp;iam.ListRolePoliciesInput{
+                RoleName: aws.String(input.IamIdentity.getIdentityName()),
+        })
+        for listRolePoliciesPaginator.HasMorePages() </span><span class="cov8" title="1">{
+                listRolePoliciesOutput, err := listRolePoliciesPaginator.NextPage(ctx)
+                if err != nil </span><span class="cov8" title="1">{
+                        input.ErrorChan &lt;- err
+                        return
+                }</span>
+                <span class="cov8" title="1">for _, policyName := range listRolePoliciesOutput.PolicyNames </span><span class="cov8" title="1">{
+                        // get inline policy document
+                        getRolePolicyOutput, err := input.IamApi.GetRolePolicy(ctx, &amp;iam.GetRolePolicyInput{
+                                PolicyName: aws.String(policyName),
+                                RoleName:   aws.String(input.IamIdentity.getIdentityName()),
+                        })
+
+                        // handle errors
+                        if err != nil </span><span class="cov8" title="1">{
+                                input.ErrorHandler.Handle(handleCustomPolicyscanErrorInput{
+                                        err: CustomPolicyScanError{
+                                                IAMPrincipalArn:    input.IamIdentity.getIdentityArn(),
+                                                Message:            err.Error(),
+                                                PolicyDocumentName: policyName,
+                                        },
+                                        errorChan:                   input.ErrorChan,
+                                        customPolicyScanResultsChan: input.ComplianceResults,
+                                        cache:                       input.Cache,
+                                        complianceResultInput: complianceResultInput{
+                                                compliance:  configServiceTypes.ComplianceTypeNonCompliant,
+                                                reasons:     nil,
+                                                message:     err.Error(),
+                                                policyName:  policyName,
+                                                resourceArn: input.IamIdentity.getIdentityArn(),
+                                        },
+                                })
+                                continue</span>
+                        }
+
+                        // check cache first
+                        <span class="cov8" title="1">if input.Cache != nil </span><span class="cov8" title="1">{
+                                result, ok := input.Cache.Get(cache.CustomPolicyScanCacheKey{
+                                        PolicyName: policyName,
+                                        AccountID:  input.AccountId,
+                                })
+                                if ok </span><span class="cov8" title="1">{
+                                        // send result to channel
+                                        log.Printf("cache hit for " + policyName)
+                                        cacheResult := result.(cache.CustomPolicyScanCacheResult)
+                                        customPolicyScanResult := CustomPolicyScanResult{
+                                                PolicyDocumentName: policyName,
+                                                ResourceArn:        input.IamIdentity.getIdentityArn(),
+                                                Compliance:         cacheResult.Compliance,
+                                                Reasons:            cacheResult.Reasons,
+                                                Message:            cacheResult.Message,
+                                        }
+                                        input.ComplianceResults &lt;- customPolicyScanResult
+                                        log.Printf("sent compliance result for " + customPolicyScanResult.PolicyDocumentName + " to results channel")
+                                        continue</span>
+                                }
+                                <span class="cov8" title="1">log.Printf("cache miss for " + policyName)</span>
+                        }
+
+                        // decode policy document
+                        <span class="cov8" title="1">decodedPolicyDocument, _ := url.QueryUnescape(*getRolePolicyOutput.PolicyDocument)
+
+                        // check policy compliance
+                        result, _ := isCompliant(isCompliantInput{
+                                ctx:                  ctx,
+                                accessAnalyzerClient: input.Accessanalyzerapi,
+                                policyDocument:       decodedPolicyDocument,
+                                restrictedActions:    input.RestrictedActions,
+                                policyDocumentName:   policyName,
+                                resourceArn:          input.IamIdentity.getIdentityArn(),
+                        })
+
+                        // write result to cache
+                        if input.Cache != nil </span><span class="cov8" title="1">{
+                                _ = input.Cache.Set(cache.CustomPolicyScanCacheKey{
+                                        PolicyName: policyName,
+                                        AccountID:  input.AccountId,
+                                }, cache.CustomPolicyScanCacheResult{
+                                        Compliance: result.Compliance,
+                                        Reasons:    result.Reasons,
+                                        Message:    result.Message,
+                                })
+
+                                input.ComplianceResults &lt;- result // send result to channel
+                                log.Printf("sent compliance result for " + result.PolicyDocumentName + " to result channel")
+                                continue</span>
+                        }
+                        <span class="cov8" title="1">input.ComplianceResults &lt;- result // send result to channel
+                        log.Printf("sent compliance result for " + result.PolicyDocumentName + " to result channel")
+                        continue</span>
+                }
+        }
+}
+
+func processManagedPolicyCompliance(ctx context.Context, wg *sync.WaitGroup, input ProcessPolicyComplianceInput) <span class="cov8" title="1">{
+        defer wg.Done() // decrement wait group
+
+        switch input.IamIdentity.getIdentityType() </span>{
+        case shared.AwsIamUser:<span class="cov8" title="1">
+                </span><span class="cov8" title="1">{
+                        // process managed policies for iam user
+                        processManagedPoliciesForIamUser(ctx, input)
+                        return
+                }</span>
+        case shared.AwsIamRole:<span class="cov8" title="1">
+                </span><span class="cov8" title="1">{
+                        // process managed policies for iam role
+                        processManagedPoliciesForIamRole(ctx, input)
+                        return
+                }</span>
+        }
+}
+
+func processManagedPoliciesForIamUser(ctx context.Context, input ProcessPolicyComplianceInput) <span class="cov8" title="1">{
+
+        listAttachedUserPoliciesPaginator := iam.NewListAttachedUserPoliciesPaginator(input.IamApi, &amp;iam.ListAttachedUserPoliciesInput{
+                UserName: aws.String(input.IamIdentity.getIdentityName()),
+        })
+
+        for listAttachedUserPoliciesPaginator.HasMorePages() </span><span class="cov8" title="1">{
+                listAttachedUserPoliciesOutput, err := listAttachedUserPoliciesPaginator.NextPage(ctx)
+                if err != nil </span><span class="cov8" title="1">{
+                        input.ErrorChan &lt;- err
+                        return
+                }</span>
+
+                <span class="cov8" title="1">for _, attachedUserPolicy := range listAttachedUserPoliciesOutput.AttachedPolicies </span><span class="cov8" title="1">{
+                        // get managed policy document
+                        getManagedPolicyOutput, err := input.IamApi.GetUserPolicy(ctx, &amp;iam.GetUserPolicyInput{
+                                PolicyName: attachedUserPolicy.PolicyName,
+                                UserName:   aws.String(input.IamIdentity.getIdentityName()),
+                        })
+
+                        if err != nil </span><span class="cov8" title="1">{
+                                input.ErrorHandler.Handle(handleCustomPolicyscanErrorInput{
+                                        err: CustomPolicyScanError{
+                                                IAMPrincipalArn:    input.IamIdentity.getIdentityArn(),
+                                                Message:            err.Error(),
+                                                PolicyDocumentName: *attachedUserPolicy.PolicyName,
+                                        },
+                                        errorChan:                   input.ErrorChan,
+                                        customPolicyScanResultsChan: input.ComplianceResults,
+                                        cache:                       input.Cache,
+                                        complianceResultInput: complianceResultInput{
+                                                compliance:  configServiceTypes.ComplianceTypeNonCompliant,
+                                                reasons:     nil,
+                                                message:     err.Error(),
+                                                policyName:  *attachedUserPolicy.PolicyName,
+                                                resourceArn: input.IamIdentity.getIdentityArn(),
+                                        },
+                                })
+                                continue</span>
+                        }
+
+                        // check cache first
+                        <span class="cov8" title="1">if input.Cache != nil </span><span class="cov8" title="1">{
+                                result, ok := input.Cache.Get(cache.CustomPolicyScanCacheKey{
+                                        PolicyName: *attachedUserPolicy.PolicyName,
+                                        AccountID:  input.AccountId,
+                                })
+                                if ok </span><span class="cov8" title="1">{
+                                        log.Printf("cache hit for " + *attachedUserPolicy.PolicyName)
+                                        cacheResult := result.(cache.CustomPolicyScanCacheResult)
+                                        customPolicyScanResult := CustomPolicyScanResult{
+                                                PolicyDocumentName: *attachedUserPolicy.PolicyName,
+                                                ResourceArn:        input.IamIdentity.getIdentityArn(),
+                                                Compliance:         cacheResult.Compliance,
+                                                Reasons:            cacheResult.Reasons,
+                                                Message:            cacheResult.Message,
+                                        }
+                                        input.ComplianceResults &lt;- customPolicyScanResult // send result to channel
+                                        log.Printf("sent compliance result for " + customPolicyScanResult.PolicyDocumentName + " to results channel")
+                                        continue</span>
+                                }
+                                <span class="cov8" title="1">log.Printf("cache miss for " + *attachedUserPolicy.PolicyName)</span>
+                        }
+
+                        // decode policy document
+                        <span class="cov8" title="1">decodedPolicyDocument, _ := url.QueryUnescape(*getManagedPolicyOutput.PolicyDocument)
+
+                        // check policy compliance
+                        result, _ := isCompliant(isCompliantInput{
+                                ctx:                  ctx,
+                                accessAnalyzerClient: input.Accessanalyzerapi,
+                                policyDocument:       decodedPolicyDocument,
+                                restrictedActions:    input.RestrictedActions,
+                                policyDocumentName:   *attachedUserPolicy.PolicyName,
+                                resourceArn:          input.IamIdentity.getIdentityArn(),
+                        })
+
+                        // write result to cache
+                        if input.Cache != nil </span><span class="cov8" title="1">{
+                                _ = input.Cache.Set(cache.CustomPolicyScanCacheKey{
+                                        PolicyName: *attachedUserPolicy.PolicyName,
+                                        AccountID:  input.AccountId,
+                                }, cache.CustomPolicyScanCacheResult{
+                                        Compliance: result.Compliance,
+                                        Reasons:    result.Reasons,
+                                        Message:    result.Message,
+                                })
+                                input.ComplianceResults &lt;- result // send result to channel
+                                log.Printf("sent compliance result for " + result.PolicyDocumentName + " to result channel")
+                                continue</span>
+                        }
+                        <span class="cov8" title="1">input.ComplianceResults &lt;- result // send result to channel
+                        log.Printf("sent compliance result for " + result.PolicyDocumentName + " to result channel")
+                        continue</span>
+                }
+        }
+}
+
+func processManagedPoliciesForIamRole(ctx context.Context, input ProcessPolicyComplianceInput) <span class="cov8" title="1">{
+        listAttachedRolePoliciesPaginator := iam.NewListAttachedRolePoliciesPaginator(input.IamApi, &amp;iam.ListAttachedRolePoliciesInput{
+                RoleName: aws.String(input.IamIdentity.getIdentityName()),
+        })
+
+        for listAttachedRolePoliciesPaginator.HasMorePages() </span><span class="cov8" title="1">{
+                listAttachedRolePoliciesOutput, err := listAttachedRolePoliciesPaginator.NextPage(ctx)
+                if err != nil </span><span class="cov8" title="1">{
+                        input.ErrorChan &lt;- err
+                        return
+                }</span>
+
+                <span class="cov8" title="1">for _, attachedRolePolicy := range listAttachedRolePoliciesOutput.AttachedPolicies </span><span class="cov8" title="1">{
+                        // get managed policy document
+                        getManagedPolicyOutput, err := input.IamApi.GetRolePolicy(ctx, &amp;iam.GetRolePolicyInput{
+                                PolicyName: attachedRolePolicy.PolicyName,
+                                RoleName:   aws.String(input.IamIdentity.getIdentityName()),
+                        })
+
+                        // handle errors
+                        if err != nil </span><span class="cov8" title="1">{
+                                input.ErrorHandler.Handle(handleCustomPolicyscanErrorInput{
+                                        err: CustomPolicyScanError{
+                                                IAMPrincipalArn:    input.IamIdentity.getIdentityArn(),
+                                                Message:            err.Error(),
+                                                PolicyDocumentName: *attachedRolePolicy.PolicyName,
+                                        },
+                                        errorChan:                   input.ErrorChan,
+                                        customPolicyScanResultsChan: input.ComplianceResults,
+                                        cache:                       input.Cache,
+                                        complianceResultInput: complianceResultInput{
+                                                compliance:  configServiceTypes.ComplianceTypeNonCompliant,
+                                                reasons:     nil,
+                                                message:     err.Error(),
+                                                policyName:  *attachedRolePolicy.PolicyName,
+                                                resourceArn: input.IamIdentity.getIdentityArn(),
+                                        },
+                                })
+                                continue</span>
+                        }
+
+                        // check cache first
+                        <span class="cov8" title="1">if input.Cache != nil </span><span class="cov8" title="1">{
+                                result, ok := input.Cache.Get(cache.CustomPolicyScanCacheKey{
+                                        PolicyName: *attachedRolePolicy.PolicyName,
+                                        AccountID:  input.AccountId,
+                                })
+                                if ok </span><span class="cov8" title="1">{
+                                        log.Printf("cache hit for " + *attachedRolePolicy.PolicyName)
+                                        cacheResult := result.(cache.CustomPolicyScanCacheResult)
+                                        customPolicyScanResult := CustomPolicyScanResult{
+                                                PolicyDocumentName: *attachedRolePolicy.PolicyName,
+                                                ResourceArn:        input.IamIdentity.getIdentityArn(),
+                                                Compliance:         cacheResult.Compliance,
+                                                Reasons:            cacheResult.Reasons,
+                                                Message:            cacheResult.Message,
+                                        }
+                                        input.ComplianceResults &lt;- customPolicyScanResult // send result to channel
+                                        log.Printf("sent compliance result for " + customPolicyScanResult.PolicyDocumentName + " to results channel")
+                                        continue</span>
+                                }
+                                <span class="cov8" title="1">log.Printf("cache miss for " + *attachedRolePolicy.PolicyName)</span>
+                        }
+
+                        // decode policy document
+                        <span class="cov8" title="1">decodedPolicyDocument, _ := url.QueryUnescape(*getManagedPolicyOutput.PolicyDocument)
+
+                        // check policy compliance
+                        result, _ := isCompliant(isCompliantInput{
+                                ctx:                  ctx,
+                                accessAnalyzerClient: input.Accessanalyzerapi,
+                                policyDocument:       decodedPolicyDocument,
+                                restrictedActions:    input.RestrictedActions,
+                                policyDocumentName:   *attachedRolePolicy.PolicyName,
+                                resourceArn:          input.IamIdentity.getIdentityArn(),
+                        })
+
+                        // write result to cache
+                        if input.Cache != nil </span><span class="cov8" title="1">{
+                                _ = input.Cache.Set(cache.CustomPolicyScanCacheKey{
+                                        PolicyName: *attachedRolePolicy.PolicyName,
+                                        AccountID:  input.AccountId,
+                                }, cache.CustomPolicyScanCacheResult{
+                                        Compliance: result.Compliance,
+                                        Reasons:    result.Reasons,
+                                        Message:    result.Message,
+                                })
+                                input.ComplianceResults &lt;- result // send result to channel
+                                log.Printf("sent compliance result for " + result.PolicyDocumentName + " to result channel")
+                                continue</span>
+                        }
+                        <span class="cov8" title="1">input.ComplianceResults &lt;- result // send result to channel
+                        log.Printf("sent compliance result for " + result.PolicyDocumentName + " to result channel")
+                        continue</span>
+                }
+        }
+}
+
+type handler interface {
+        Handle(params interface{}) error
+}
+
+type handlePrecompliantPolicyRequestInput struct {
+        accountId                   string // account id
+        policyName                  string // policy name
+        policyArn                   string // policy arn
+        customPolicyscanResultsChan chan interface{}
+        cache                       cache.CustomPolicyScanResultsCache // cache interface
+}
+
+type _PrecompliantPolicyHandler struct {
+}
+
+func (h *_PrecompliantPolicyHandler) Handle(params interface{}) error <span class="cov8" title="1">{
+        var customPolicyScanResult CustomPolicyScanResult
+        input := params.(handlePrecompliantPolicyRequestInput)
+        customPolicyScanResult = CustomPolicyScanResult{
+                Compliance:         configServiceTypes.ComplianceTypeCompliant,
+                Reasons:            nil,
+                Message:            "marked as pre-compliant",
+                PolicyDocumentName: input.policyName,
+                ResourceArn:        "",
+        }
+        if input.cache != nil </span><span class="cov8" title="1">{
+                _ = input.cache.Set(cache.CustomPolicyScanCacheKey{
+                        PolicyName: input.policyName,
+                        AccountID:  input.accountId,
+                }, cache.CustomPolicyScanCacheResult{
+                        Compliance: configServiceTypes.ComplianceTypeCompliant,
+                        Reasons:    nil,
+                        Message:    "marked as pre-compliant",
+                })
+                input.customPolicyscanResultsChan &lt;- customPolicyScanResult
+                log.Printf("sent pre-compliant compliance result for " + customPolicyScanResult.PolicyDocumentName + " to results channel")
+                return nil
+        }</span>
+        <span class="cov8" title="1">input.customPolicyscanResultsChan &lt;- customPolicyScanResult
+        return nil</span>
+}
+
+type handlePrecompliantIamIdentityRequestInput struct {
+        request              CustomPolicyScanWorkerRequest
+        configEvaluationChan chan&lt;- interface{}
+        eventTime            time.Time
+}
+
+type _PrecompliantIamIdentityHandler struct {
+}
+
+func (h *_PrecompliantIamIdentityHandler) Handle(params interface{}) error <span class="cov8" title="1">{
+        input := params.(handlePrecompliantIamIdentityRequestInput)
+        configEvaluation := configServiceTypes.Evaluation{
+                ComplianceResourceId:   aws.String(input.request.IamIdentity.getIdentityArn()),
+                ComplianceResourceType: aws.String(input.request.ResourceType),
+                ComplianceType:         configServiceTypes.ComplianceTypeCompliant,
+                OrderingTimestamp:      aws.Time(input.eventTime),
+                Annotation:             aws.String("marked as pre-compliant"),
+        }
+        input.configEvaluationChan &lt;- configEvaluation
+        return nil
+}</span>
+
+type _CustomPolicyScanErrorHandler struct {
+}
+
+func (h *_CustomPolicyScanErrorHandler) Handle(params interface{}) error <span class="cov8" title="1">{
+        input := params.(handleCustomPolicyscanErrorInput)
+        log.Printf("handling custom policy scan error [%v]\n", input.err.Error())
+        errorChan := input.errorChan
+        if errorChan == nil </span><span class="cov8" title="1">{
+                log.Printf("cannot handle custom policy scan error with empty error channel: [%+v]\n", input)
+                return errors.New("cannot handle custom policy scan error with empty error channel")
+        }</span>
+        <span class="cov8" title="1">customPolicyScanResultsChan := input.customPolicyScanResultsChan
+        if customPolicyScanResultsChan == nil </span><span class="cov8" title="1">{
+                log.Printf("cannot handle custom policy scan error with empty custom policy results channel: [%+v]\n", input)
+                return errors.New("cannot handle custom policy scan error with empty results channel")
+        }</span>
+
+        <span class="cov8" title="1">errorChan &lt;- input.err // send error to error channel
+        log.Println("error handler sent error to error channel")
+
+        // create custom policy scan result and send to
+        customPolicyScanResults, err := newCustomPolicyScanResult(input.complianceResultInput)
+        if err != nil </span><span class="cov0" title="0">{
+                log.Printf("error handler failed to create custom policy scan result: [%v]\n", err.Error())
+                return err
+        }</span>
+        <span class="cov8" title="1">customPolicyScanResultsChan &lt;- customPolicyScanResults // send compliance result to channel
+        log.Printf("error handler sent compliance result to channel for [%+v]\n", customPolicyScanResults.ResourceArn)
+
+        // write result to cache if provided
+        if input.cache != nil </span><span class="cov8" title="1">{
+                log.Printf("error handler writing custom policy scan result for [%v] to cache\n", customPolicyScanResults.ResourceArn)
+
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+
+type CustomPolicyScanWorker struct {
+        restrictedActions              []string
+        configEvaluationChan           chan interface{}
+        semaphoreChan                  chan chan interface{}
+        eventTime                      time.Time
+        customPolicyScanResultsCache   cache.CustomPolicyScanResultsCache
+        errorHandler                   handler
+        precompliantIamIdentityHandler handler
+        precompliantPolicyHandler      handler
+        Worker                         Worker
+}
+
+type CustomPolicyScanWorkerConfig struct {
+        RestrictedActions    []string
+        ConfigEvaluationChan chan interface{}
+        SemaphoreChan        chan chan interface{}
+        EventTime            time.Time
+        EnableCache          bool
+        WorkerConfig         WorkerConfig
+}
+
+type CustomPolicyScanWorkerRequest struct {
+        AccountId                      string                              // aws account id to scan
+        ResourceType                   string                              // resource type to scan ex : AWS::IAM::Role , AWS::IAM::User etc..
+        IamIdentity                    IamIdentity                         // structure for iam principal
+        IamApi                         iamapi.IamApi                       // iam client for accessing IAM service
+        AccessAnalyzerApi              accessanalyzerapi.AccessAnalyzerApi // accessanalyzer client for accessing Access Analyzer service
+        PrecompliantIamIdentityRequest bool                                // signal to mark IAM identity as compliant
+}
+
+type IAMRole struct {
+        Arn  string
+        Name string
+}
+
+type IAMPolicy struct {
+        Arn  string // arn of policy document
+        Name string // name of policy document
+}
+
+type CustomPolicyScanResult struct {
+        Compliance         configServiceTypes.ComplianceType
+        Reasons            []string
+        Message            string
+        PolicyDocumentName string
+        ResourceArn        string
+}
+
+type CustomPolicyScanError struct {
+        IAMPrincipalArn    string // arn of iam principal in which error occured
+        PolicyDocumentName string // name of policy document in which error occured
+        Message            string // error message
+}
+
+func (cpse CustomPolicyScanError) Error() string <span class="cov8" title="1">{
+        return "[" + cpse.IAMPrincipalArn + "] [" + cpse.PolicyDocumentName + "] " + cpse.Message
+}</span>
+
+func NewCustomPolicyScanWorker(config CustomPolicyScanWorkerConfig) (*CustomPolicyScanWorker, error) <span class="cov8" title="1">{
+        log.Printf("semaphore config size : %v \n", len(config.SemaphoreChan))
+        //  perform nil checks for required fields
+        if config.RestrictedActions == nil || config.ConfigEvaluationChan == nil || config.SemaphoreChan == nil || config.EventTime.IsZero() </span><span class="cov8" title="1">{
+                return nil, errors.New("required field(s) cannot be nil")
+        }</span>
+
+        // create cache if specified
+        <span class="cov8" title="1">var customPolicyResultsCache cache.CustomPolicyScanResultsCache
+        if config.EnableCache </span><span class="cov8" title="1">{
+                customPolicyResultsCache = cache.NewCustomPolicyScanResultsCache()
+        }</span>
+
+        // initalize worker interface
+        <span class="cov8" title="1">worker, err := NewWorker(config.WorkerConfig)
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, err
+        }</span>
+
+        // create custom policy scan worker
+        <span class="cov8" title="1">log.Printf("semaphore chan size : %v\n", len(config.SemaphoreChan))
+        customPolicyScanWorker := &amp;CustomPolicyScanWorker{
+                restrictedActions:              config.RestrictedActions,
+                configEvaluationChan:           config.ConfigEvaluationChan,
+                semaphoreChan:                  config.SemaphoreChan,
+                eventTime:                      config.EventTime,
+                customPolicyScanResultsCache:   customPolicyResultsCache,
+                errorHandler:                   &amp;_CustomPolicyScanErrorHandler{},
+                precompliantIamIdentityHandler: &amp;_PrecompliantIamIdentityHandler{},
+                precompliantPolicyHandler:      &amp;_PrecompliantPolicyHandler{},
+                Worker:                         worker,
+        }
+
+        worker.SetRequestHandler(customPolicyScanWorker) // set request handler
+        worker.SetFinalizer(customPolicyScanWorker)      // set finalizer
+
+        return customPolicyScanWorker, nil</span>
+}
+
+// handle requests
+func (cpw *CustomPolicyScanWorker) Handle(request interface{}) <span class="cov8" title="1">{
+        customPolicyScanWorkerRequest := request.(CustomPolicyScanWorkerRequest) // type assert to custom policy scan request
+        errorChan := cpw.Worker.GetErrorChannel()                                // get error channel
+        configEvaluationChan := cpw.configEvaluationChan                         // get config Evaluation channel
+        semaphoreChan := cpw.semaphoreChan                                       // get semaphore channel of channel
+        restrictedActions := cpw.restrictedActions                               // get restricted actions
+        iamClient := customPolicyScanWorkerRequest.IamApi                        // get iam client
+        accessAnalyzerClient := customPolicyScanWorkerRequest.AccessAnalyzerApi  // get access analyzer client
+        accountId := customPolicyScanWorkerRequest.AccountId                     // get account id
+        iamIdentity := customPolicyScanWorkerRequest.IamIdentity                 // iam identity
+        customPolicyScanResultsCache := cpw.customPolicyScanResultsCache         // get cache
+
+        // handle precompliant requests
+        if customPolicyScanWorkerRequest.PrecompliantIamIdentityRequest </span><span class="cov8" title="1">{
+                log.Printf("handling precompliant iam identity request for [%v]\n", iamIdentity.getIdentityArn())
+                cpw.precompliantIamIdentityHandler.Handle(handlePrecompliantIamIdentityRequestInput{
+                        request:              customPolicyScanWorkerRequest,
+                        configEvaluationChan: configEvaluationChan,
+                        eventTime:            cpw.eventTime,
+                })
+                return
+        }</span>
+
+        <span class="cov8" title="1">log.Printf("handling custom policy scan request for [%v]\n", iamIdentity.getIdentityArn())
+        log.Printf("%v\n", len(semaphoreChan))
+        complianceResultsChan := &lt;-semaphoreChan // take channel from semaphore
+        log.Println("got channel from semaphore")
+
+        // process role compliance for iam identity
+        err := iamIdentity.processPolicyCompliance(context.Background(), ProcessPolicyComplianceInput{
+                AccountId:            accountId,
+                RestrictedActions:    restrictedActions,
+                EventTime:            cpw.eventTime,
+                IamIdentity:          iamIdentity,
+                ErrorChan:            errorChan,
+                ComplianceResults:    complianceResultsChan,
+                ConfigEvaluationChan: configEvaluationChan,
+                IamApi:               iamClient,
+                Accessanalyzerapi:    accessAnalyzerClient,
+                Cache:                customPolicyScanResultsCache,
+                ErrorHandler:         cpw.errorHandler,
+        })
+
+        semaphoreChan &lt;- complianceResultsChan // return channel to semaphore
+        log.Println("returned channel to semaphore")
+
+        if err != nil </span><span class="cov0" title="0">{
+                log.Printf("error occured while processing policy compliance for iam identity [%v]: [%v]\n", iamIdentity.getIdentityArn(), err.Error())
+                errorChan &lt;- err
+                return
+        }</span>
+
+}
+
+// finalize processings
+func (cpw *CustomPolicyScanWorker) Finalize() {<span class="cov8" title="1">
+}</span>
+
+type isCompliantInput struct {
+        ctx                  context.Context
+        accessAnalyzerClient accessanalyzerapi.AccessAnalyzerApi
+        policyDocument       string
+        policyDocumentName   string
+        resourceArn          string
+        restrictedActions    []string
+}
+
+func isCompliant(input isCompliantInput) (CustomPolicyScanResult, error) <span class="cov8" title="1">{
+        // perform nil checks
+        if len(input.restrictedActions) == 0 || input.policyDocument == "" || input.policyDocumentName == "" || input.resourceArn == "" </span><span class="cov8" title="1">{
+                return CustomPolicyScanResult{}, errors.New("policy document name, policy document and resource arn cannot be empty")
+        }</span>
+
+        <span class="cov8" title="1">log.Printf("checking if policy [%v] is compliant\n", input.policyDocumentName)
+
+        checkAccessNotGrantedInput := accessanalyzer.CheckAccessNotGrantedInput{
+                Access: []accessAnalyzerTypes.Access{
+                        {
+                                Actions: input.restrictedActions,
+                        },
+                },
+                PolicyDocument: aws.String(input.policyDocument),
+                PolicyType:     accessAnalyzerTypes.AccessCheckPolicyTypeIdentityPolicy,
+        }
+
+        output, err := input.accessAnalyzerClient.CheckAccessNotGranted(input.ctx, &amp;checkAccessNotGrantedInput)
+        // return errors
+        if err != nil </span><span class="cov8" title="1">{
+                log.Printf("error occured while checking if policy [%v] is compliant: [%v]\n", input.policyDocumentName, err.Error())
+                if strings.Contains(err.Error(), shared.DenyOnlyErrMsg) </span><span class="cov8" title="1">{
+                        log.Printf("policy [%v] is compliant\n", input.policyDocumentName)
+                        customPolicyScanResults, err := newCustomPolicyScanResult(complianceResultInput{
+                                compliance:  configServiceTypes.ComplianceTypeCompliant,
+                                reasons:     nil,
+                                message:     err.Error(),
+                                policyName:  input.policyDocumentName,
+                                resourceArn: input.resourceArn,
+                        })
+                        if err != nil </span><span class="cov0" title="0">{
+                                log.Printf("error occured while creating compliance result for policy [%v]: [%v]\n", input.policyDocumentName, err.Error())
+                                return CustomPolicyScanResult{}, err
+                        }</span>
+                        <span class="cov8" title="1">log.Printf("returning [%v] compliance result for policy [%v]\n", configServiceTypes.ComplianceTypeCompliant, input.policyDocumentName)
+                        return customPolicyScanResults, nil</span>
+                } else<span class="cov0" title="0"> {
+                        log.Printf("policy [%v] is not compliant\n", input.policyDocumentName)
+                        return CustomPolicyScanResult{}, err
+                }</span>
+        }
+
+        // check if policy is compliant
+        <span class="cov8" title="1">if output.Result == accessAnalyzerTypes.CheckAccessNotGrantedResultPass </span><span class="cov8" title="1">{
+                customPolicyScanResults, _ := newCustomPolicyScanResult(complianceResultInput{
+                        compliance:  configServiceTypes.ComplianceTypeCompliant,
+                        reasons:     output.Reasons,
+                        message:     *output.Message,
+                        policyName:  input.policyDocumentName,
+                        resourceArn: input.resourceArn,
+                })
+
+                log.Printf("returning [%v] compliance result for policy [%v]\n", configServiceTypes.ComplianceTypeCompliant, input.policyDocumentName)
+                return customPolicyScanResults, nil
+        }</span> else<span class="cov8" title="1"> {
+                customPolicyScanResults, err := newCustomPolicyScanResult(complianceResultInput{
+                        compliance:  configServiceTypes.ComplianceTypeNonCompliant,
+                        reasons:     output.Reasons,
+                        message:     *output.Message,
+                        policyName:  input.policyDocumentName,
+                        resourceArn: input.resourceArn,
+                })
+                if err != nil </span><span class="cov0" title="0">{
+                        log.Printf("error occured while creating compliance result for policy [%v]: [%v]\n", input.policyDocumentName, err.Error())
+                        return CustomPolicyScanResult{}, err
+                }</span>
+                <span class="cov8" title="1">log.Printf("returning [%v] compliance result for policy [%v]\n", configServiceTypes.ComplianceTypeNonCompliant, input.policyDocumentName)
+                return customPolicyScanResults, nil</span>
+        }
+}
+
+type complianceResultInput struct {
+        compliance  configServiceTypes.ComplianceType
+        reasons     []accessAnalyzerTypes.ReasonSummary
+        message     string
+        policyName  string
+        resourceArn string
+}
+
+func newCustomPolicyScanResult(input complianceResultInput) (CustomPolicyScanResult, error) <span class="cov8" title="1">{
+
+        if input.compliance == "" </span><span class="cov8" title="1">{
+                log.Printf("cannot create compliance result without compliance type : [%+v]\n", input)
+                return CustomPolicyScanResult{}, errors.New("cannot create compliance result without compliance type")
+        }</span>
+
+        <span class="cov8" title="1">if input.resourceArn == "" </span><span class="cov8" title="1">{
+                log.Printf("cannot create compliance result without resource arn : [%+v]\n", input)
+                return CustomPolicyScanResult{}, errors.New("cannot create compliance result without resource arn")
+        }</span>
+
+        <span class="cov8" title="1">if input.message != "" &amp;&amp; input.reasons == nil </span><span class="cov8" title="1">{
+                return CustomPolicyScanResult{
+                        Compliance:         input.compliance,
+                        Reasons:            []string{input.message},
+                        Message:            input.message,
+                        PolicyDocumentName: input.policyName,
+                        ResourceArn:        input.resourceArn,
+                }, nil
+        }</span>
+
+        <span class="cov8" title="1">return CustomPolicyScanResult{
+                Compliance:         input.compliance,
+                Reasons:            shared.ConvertReasonsToString(input.reasons),
+                Message:            input.message,
+                PolicyDocumentName: input.policyName,
+                ResourceArn:        input.resourceArn,
+        }, nil</span>
+}
+
+type handleCustomPolicyscanErrorInput struct {
+        err                         CustomPolicyScanError
+        errorChan                   chan&lt;- error
+        customPolicyScanResultsChan chan&lt;- interface{}
+        cache                       cache.CustomPolicyScanResultsCache
+        complianceResultInput       complianceResultInput
+}
+</pre>
+		
+		<pre class="file" id="file3" style="display: none">package worker
+
+import (
+        "context"
+        "errors"
+        "log"
+        "strconv"
+        "strings"
+        "time"
+
+        "github.com/aws/aws-sdk-go-v2/aws"
+        configServiceTypes "github.com/aws/aws-sdk-go-v2/service/configservice/types"
+        "github.com/aws/aws-sdk-go-v2/service/iam"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/iamapi"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/shared"
+)
+
+type OrphanPolicyWorker struct {
+        configEvaluationChan chan interface{} // channel for sending aws config evaluations
+        eventTime            time.Time        // time of event
+        Worker               Worker           // worker interface
+}
+
+type OrphanPolicyWorkerConfig struct {
+        ConfigEvaluationChan chan interface{}
+        EventTime            time.Time
+        WorkerConfig         WorkerConfig
+}
+
+type OrphanPolicyWorkerRequest struct {
+        AccountId     string // account id to scan policies for
+        iamapi.IamApi        // iam api to use to scan policies
+}
+
+// create new orphan policy worker
+func NewOrphanPolicyWorker(config OrphanPolicyWorkerConfig) (*OrphanPolicyWorker, error) <span class="cov8" title="1">{
+
+        worker, err := NewWorker(config.WorkerConfig)
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, errors.New("invalid worker config: " + err.Error())
+        }</span>
+
+        <span class="cov8" title="1">if config.ConfigEvaluationChan == nil </span><span class="cov8" title="1">{
+                return nil, errors.New("invalid orphan policy worker configuration: config evaluation channel is nil")
+        }</span>
+
+        <span class="cov8" title="1">if config.EventTime.IsZero() </span><span class="cov8" title="1">{
+                return nil, errors.New("invalid orphan policy worker configuration: event time is zero")
+        }</span>
+
+        <span class="cov8" title="1">opw := &amp;OrphanPolicyWorker{
+                configEvaluationChan: config.ConfigEvaluationChan,
+                eventTime:            config.EventTime,
+                Worker:               worker,
+        }
+
+        worker.SetRequestHandler(opw) // set request handler to worker interface
+        worker.SetFinalizer(opw)      // set finalize to worker interface
+
+        return opw, nil</span>
+}
+
+// handle request
+func (opw *OrphanPolicyWorker) Handle(params interface{}) <span class="cov8" title="1">{
+        request := params.(OrphanPolicyWorkerRequest)    // type assert to orphan policy worker request
+        errorChan := opw.Worker.GetErrorChannel()        // get error channel
+        configEvaluationChan := opw.configEvaluationChan // get config evaluation channel
+
+        listPoliciesPaginator := iam.NewListPoliciesPaginator(request.IamApi, &amp;iam.ListPoliciesInput{})
+        for listPoliciesPaginator.HasMorePages() </span><span class="cov8" title="1">{
+                listPoliciesOutput, err := listPoliciesPaginator.NextPage(context.Background())
+                if err != nil </span><span class="cov0" title="0">{
+                        errorChan &lt;- err
+                        log.Printf("worker [%v] had an error while listing policies for account [%v]: [%v]\n", opw.Worker.GetId(), request.AccountId, err.Error())
+                        continue</span>
+                }
+                <span class="cov8" title="1">for _, policy := range listPoliciesOutput.Policies </span><span class="cov8" title="1">{
+                        log.Printf("worker [%v] processing policy [%v]\n", opw.Worker.GetId(), *policy.PolicyName)
+                        if *policy.AttachmentCount == int32(0) </span><span class="cov8" title="1">{
+                                annotationMsg := []string{}
+                                annotationMsg = append(annotationMsg, "policy is orphaned")
+                                annotationMsg = append(annotationMsg, "Created date : ["+policy.CreateDate.Format(time.RFC3339)+"]")
+                                annotationMsg = append(annotationMsg, "Updated date : ["+policy.UpdateDate.Format(time.RFC3339)+"]")
+                                joinedString := strings.Join(annotationMsg, "\n")
+                                configEvaluation := configServiceTypes.Evaluation{
+                                        ComplianceResourceId:   policy.Arn,
+                                        ComplianceResourceType: aws.String(shared.AwsIamPolicy),
+                                        ComplianceType:         configServiceTypes.ComplianceTypeNonCompliant,
+                                        OrderingTimestamp:      aws.Time(opw.eventTime),
+                                        Annotation:             aws.String(joinedString),
+                                }
+
+                                // send config evaluation to config evaluation worker
+                                configEvaluationChan &lt;- ConfigEvaluationWorkerRequest{
+                                        ConfigEvaluation: configEvaluation,
+                                }
+
+                        }</span> else<span class="cov8" title="1"> {
+                                attachmentCount := strconv.Itoa(int(*policy.AttachmentCount))
+                                configEvaluation := configServiceTypes.Evaluation{
+                                        ComplianceResourceId:   policy.Arn,
+                                        ComplianceResourceType: aws.String(shared.AwsIamPolicy),
+                                        ComplianceType:         configServiceTypes.ComplianceTypeCompliant,
+                                        OrderingTimestamp:      aws.Time(opw.eventTime),
+                                        Annotation:             aws.String("policy is attached to [" + attachmentCount + "] iam principals"),
+                                }
+
+                                // send config evaluation to config evaluation worker
+                                configEvaluationChan &lt;- ConfigEvaluationWorkerRequest{
+                                        ConfigEvaluation: configEvaluation,
+                                }
+                        }</span>
+                }
+        }
+        <span class="cov8" title="1">log.Printf("worker [%v] finished processing policies for account [%v]\n", opw.Worker.GetId(), request.AccountId)</span>
+}
+
+// finalize worker
+func (opw *OrphanPolicyWorker) Finalize() <span class="cov8" title="1">{
+        log.Printf("worker [%v] finalized\n", opw.Worker.GetId())
+}</span>
+</pre>
+		
+		<pre class="file" id="file4" style="display: none">package worker
+
+import (
+        "context"
+        "errors"
+        "log"
+        "sync"
+
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/sdkclientmgr"
+)
+
+type Worker interface {
+        // start processing request with the worker
+        Run()
+        // set request handler for the worker
+        SetRequestHandler(WorkerRequestHandler)
+        // set finalizer for the worker
+        SetFinalizer(WorkerFinalizer)
+        // get sdk client mgr
+        GetSDKClientMgr() sdkclientmgr.SDKClientMgr
+        // get id of worker
+        GetId() string
+        // get error channel
+        GetErrorChannel() chan error
+        // get wait group
+        GetWaitGroup() *sync.WaitGroup
+        // check if request handler is set
+        IsRequestHandlerSet() bool
+        // check if finalizer is set
+        IsFinalizerSet() bool
+}
+
+type WorkerRequestHandler interface {
+        // method each worker will invoke when processing a request.  Each worker type will implement their own version
+        // of this method.
+        Handle(request interface{})
+}
+
+type WorkerFinalizer interface {
+        // method each worker will invoke after they have completed all request.  This method is for any cleaup activites
+        // or final actions a worker needs to take prior to shutdown
+        Finalize()
+}
+
+type _Worker struct {
+        ctx            context.Context           // execution context
+        id             string                    // id of worker
+        wg             *sync.WaitGroup           // wait group for worker
+        requestChan    chan interface{}          // request channnel for worker
+        errorChan      chan error                // error channel for worker
+        requestHandler WorkerRequestHandler      // function to invoke when processing requests
+        finalizer      WorkerFinalizer           // function to invoke when completed processing all requests
+        sdkclientmgr   sdkclientmgr.SDKClientMgr // manages sdk clients for processing
+}
+
+type WorkerConfig struct {
+        Ctx          context.Context
+        Id           string
+        Wg           *sync.WaitGroup
+        RequestChan  chan interface{}
+        ErrorChan    chan error
+        SdkClientMgr sdkclientmgr.SDKClientMgr
+}
+
+func NewWorker(config WorkerConfig) (Worker, error) <span class="cov8" title="1">{
+
+        // check for nil values in config
+        if config.Ctx == nil </span><span class="cov8" title="1">{
+                config.Ctx = context.Background() // set default context if nil
+                log.Println("context is nil, setting to empty background context")
+        }</span>
+
+        <span class="cov8" title="1">if config.Id == "" </span><span class="cov8" title="1">{
+                return nil, errors.New("id is required")
+        }</span>
+        <span class="cov8" title="1">if config.Wg == nil </span><span class="cov8" title="1">{
+                return nil, errors.New("wg is required")
+        }</span>
+        <span class="cov8" title="1">if config.RequestChan == nil </span><span class="cov8" title="1">{
+                return nil, errors.New("request channel is required")
+        }</span>
+        <span class="cov8" title="1">if config.ErrorChan == nil </span><span class="cov8" title="1">{
+                return nil, errors.New("error channel is required")
+        }</span>
+        <span class="cov8" title="1">if config.SdkClientMgr == nil </span><span class="cov8" title="1">{
+                return nil, errors.New("sdk client manager is required")
+        }</span>
+
+        <span class="cov8" title="1">worker := &amp;_Worker{
+                ctx:          config.Ctx,
+                id:           config.Id,
+                wg:           config.Wg,
+                requestChan:  config.RequestChan,
+                errorChan:    config.ErrorChan,
+                sdkclientmgr: config.SdkClientMgr,
+        }
+
+        worker.wg.Add(1) // increment wait group for worker
+        go worker.Run()  // start worker in go routine
+        log.Printf("worker [%v] started\n", worker.id)
+
+        return worker, nil</span>
+}
+
+// start processing request with the worker
+func (w *_Worker) Run() <span class="cov8" title="1">{
+        defer w.wg.Done()
+        for request := range w.requestChan </span><span class="cov8" title="1">{
+                w.requestHandler.Handle(request) // process requests from request channel
+        }</span>
+        <span class="cov8" title="1">log.Printf("worker [%v] finished processing requests from buffer\n", w.id)
+        if w.finalizer != nil </span><span class="cov8" title="1">{
+                log.Printf("worker [%v] invoking finalizer\n", w.id)
+                w.finalizer.Finalize() // finalize worker after processing all requests
+        }</span>
+        <span class="cov8" title="1">log.Printf("worker [%v] exiting...\n", w.id)</span>
+}
+
+// set request handler for the worker
+func (w *_Worker) SetRequestHandler(requestHandler WorkerRequestHandler) <span class="cov8" title="1">{
+        w.requestHandler = requestHandler
+}</span>
+
+// set finalizer for the worker
+func (w *_Worker) SetFinalizer(finalizer WorkerFinalizer) <span class="cov8" title="1">{
+        w.finalizer = finalizer
+}</span>
+
+// get sdk client mgr
+func (w *_Worker) GetSDKClientMgr() sdkclientmgr.SDKClientMgr <span class="cov8" title="1">{
+        return w.sdkclientmgr
+}</span>
+
+// get id
+func (w *_Worker) GetId() string <span class="cov8" title="1">{
+        return w.id
+}</span>
+
+// get error channel
+func (w *_Worker) GetErrorChannel() chan error <span class="cov8" title="1">{
+        return w.errorChan
+}</span>
+
+// check if request handler is set
+func (w *_Worker) IsRequestHandlerSet() bool <span class="cov8" title="1">{
+        return w.requestHandler != nil
+}</span>
+
+// check if finalizer is set
+func (w *_Worker) IsFinalizerSet() bool <span class="cov8" title="1">{
+        return w.finalizer != nil
+}</span>
+
+// get wait group
+func (w *_Worker) GetWaitGroup() *sync.WaitGroup <span class="cov0" title="0">{
+        return w.wg
+}</span>
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>

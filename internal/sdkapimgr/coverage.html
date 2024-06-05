@@ -1,0 +1,253 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>sdkclientmgr: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/sdkclientmgr/awsclientmgr.go (42.2%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">package sdkclientmgr
+
+import (
+        "errors"
+
+        "github.com/aws/aws-sdk-go-v2/aws"
+        "github.com/aws/aws-sdk-go-v2/credentials/stscreds"
+        "github.com/aws/aws-sdk-go-v2/service/accessanalyzer"
+        "github.com/aws/aws-sdk-go-v2/service/configservice"
+        "github.com/aws/aws-sdk-go-v2/service/iam"
+        "github.com/aws/aws-sdk-go-v2/service/s3"
+        "github.com/aws/aws-sdk-go-v2/service/sts"
+
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/accessanalyzerapi"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/configserviceapi"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/iamapi"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/keyvaluestore"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/s3api"
+        "github.com/outofoffice3/aws-samples/aws-config-iam-policy-scan/internal/shared"
+)
+
+type SDKClientMgr interface {
+        GetSDKClient(accountId string, serviceName string) (interface{}, bool)
+        SetSDKClient(accountId string, serviceName string, client interface{}) error
+}
+
+type awsClientMgr struct {
+        sdkClientMap keyvaluestore.KeyValueStore
+}
+
+type SDKClientMgrConfig struct {
+        Cfg           aws.Config
+        MainAccountId string
+        AwsAccounts   []AwsAccount
+}
+
+type AwsAccount struct {
+        AccountId  string // account id
+        IamRoleArn string // iam role arn
+}
+
+const (
+        S3Service             string = "s3"              // simple storage service (s3)
+        ConfigService         string = "config-service"  // AWS Config service
+        IamService            string = "iam"             // identity and access management (iam)
+        AccessAnalyzerService string = "access-analyzer" // AWS Access Analyzer
+)
+
+// initialize instance of aws client mgr
+func InitAwsClientMgr(config SDKClientMgrConfig) (SDKClientMgr, error) <span class="cov0" title="0">{
+
+        // check if main account id is empty
+        if config.MainAccountId == "" </span><span class="cov0" title="0">{
+                return nil, errors.New("main account id is required")
+        }</span>
+
+        // check if credentials are nil
+        <span class="cov0" title="0">if config.Cfg.Credentials == nil </span><span class="cov0" title="0">{
+                return nil, errors.New("valid config credentials provider required")
+        }</span>
+
+        // check if aws accounts are empty
+        <span class="cov0" title="0">if len(config.AwsAccounts) == 0 </span><span class="cov0" title="0">{
+                return nil, errors.New("aws accounts cannot be empty") // return aws client mgr and error if aws accounts are empty
+        }</span>
+
+        <span class="cov0" title="0">awscm := NewAwsClientMgr()
+
+        cfgCopy := config.Cfg.Copy() // create copy of aws config
+
+        configServiceClient := configservice.NewFromConfig(cfgCopy)                  // create config service client for main account
+        awscm.SetSDKClient(config.MainAccountId, ConfigService, configServiceClient) // add config service client for main account
+
+        accessAnalyzerClient := accessanalyzer.NewFromConfig(cfgCopy)                         // create access analyzer for main account
+        awscm.SetSDKClient(config.MainAccountId, AccessAnalyzerService, accessAnalyzerClient) // add access analyzer client for main account
+
+        s3Client := s3.NewFromConfig(cfgCopy)                         // create s3 client for main account
+        awscm.SetSDKClient(config.MainAccountId, S3Service, s3Client) // add s3 clien for main account
+
+        iamClient := iam.NewFromConfig(cfgCopy)                         // create iam client for main account
+        awscm.SetSDKClient(config.MainAccountId, IamService, iamClient) // add iam client for main account
+
+        // loop through aws accounts and create &amp; add iam &amp; access analyzer clients to aws client mgr
+        stsClient := sts.NewFromConfig(cfgCopy) // create sts client for assume role operations
+        for _, awsAccount := range config.AwsAccounts </span><span class="cov0" title="0">{
+                creds := stscreds.NewAssumeRoleProvider(stsClient, awsAccount.IamRoleArn) // assume role from iam role arn
+                cfgCopy.Credentials = creds
+
+                iamClient := sts.NewFromConfig(cfgCopy)                         // create iam client for aws account
+                awscm.SetSDKClient(awsAccount.AccountId, IamService, iamClient) // add iam client for aws account
+
+                accessAnalyzerClient := accessanalyzer.NewFromConfig(cfgCopy)                         // create access analyzer client for aws account
+                awscm.SetSDKClient(awsAccount.AccountId, AccessAnalyzerService, accessAnalyzerClient) // add access analyzer client for aws account
+        }</span>
+
+        <span class="cov0" title="0">return awscm, nil</span>
+}
+
+func NewAwsClientMgr() SDKClientMgr <span class="cov8" title="1">{
+        return &amp;awsClientMgr{
+                sdkClientMap: keyvaluestore.NewKeyValueStore(),
+        }
+}</span>
+
+// get sdk client
+func (awscm *awsClientMgr) GetSDKClient(accountId string, serviceName string) (interface{}, bool) <span class="cov8" title="1">{
+        if accountId == "" || serviceName == "" </span><span class="cov8" title="1">{
+                return nil, false
+        }</span>
+        <span class="cov8" title="1">key := shared.Key{
+                PrimaryKey: accountId,
+                SortKey:    serviceName,
+        }
+        return awscm.sdkClientMap.Get(key)</span>
+}
+
+// set sdk client
+func (awscm *awsClientMgr) SetSDKClient(accountId string, serviceName string, client interface{}) error <span class="cov8" title="1">{
+        if accountId == "" || serviceName == "" || client == nil </span><span class="cov8" title="1">{
+                return errors.New("required field(s) cannot be empty")
+        }</span>
+
+        <span class="cov8" title="1">key := shared.Key{
+                PrimaryKey: accountId,
+                SortKey:    serviceName,
+        }
+        switch serviceName </span>{
+        case S3Service:<span class="cov8" title="1">
+                if _, ok := client.(s3api.S3Api); !ok </span><span class="cov8" title="1">{
+                        return errors.New("invalid s3 client")
+                }</span>
+        case ConfigService:<span class="cov8" title="1">
+                if _, ok := client.(configserviceapi.ConfigServiceApi); !ok </span><span class="cov8" title="1">{
+                        return errors.New("invalid config service client")
+                }</span>
+        case IamService:<span class="cov8" title="1">
+                if _, ok := client.(iamapi.IamApi); !ok </span><span class="cov8" title="1">{
+                        return errors.New("invalid iam client")
+                }</span>
+        case AccessAnalyzerService:<span class="cov8" title="1">
+                if _, ok := client.(accessanalyzerapi.AccessAnalyzerApi); !ok </span><span class="cov8" title="1">{
+                        return errors.New("invalid access analyzer client")
+                }</span>
+        default:<span class="cov0" title="0">
+                return errors.New("invalid service name")</span>
+        }
+
+        <span class="cov8" title="1">awscm.sdkClientMap.Set(key, client)
+        return nil</span>
+}
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>
