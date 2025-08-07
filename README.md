@@ -2,19 +2,28 @@
 
 **Note** - uses the AWS go v2 SDK
 
-This repo contains a collection of solutions that help customers maintain a high security posture in the cloud while also being easy to deploy.  
+This repo contains a collection of solutions that help customers maintain a high security posture in the cloud while also being easy to deploy. All solutions are deployed as a single Lambda function with multiple AWS Config rules.
 
+## Deployment
 
-Available solutions below : 
+Deploy the unified security toolbox:
 
-- **CheckAccessNotGranted**
+```bash
+cd deployment/configrule
+make build
+make deploy
+```
 
-    Performs a scan of all IAM policies your aws account(s), checks to see if they contain any actions from the list of restriced actions and reports the findings to AWS Config and S3. 
+## Available Solutions
 
-    You specify the aws accounts, restricted actions and other attributes via a config file.  [More info here](./cmd/checkaccessnotgranted/README.md)
+- **CheckAccessNotGranted** (Config Rule: `check-access-not-granted`)
+
+    Performs a scan of all IAM policies in your AWS account(s), checks to see if they contain any actions from the list of restricted actions and reports the findings to AWS Config and S3.
     
-- **OrphanPolicyFinder** 
+- **OrphanPolicyFinder** (Config Rule: `orphan-policy-finder`)
 
-    Performs a scan of all IAM policieis in your aws account(s), checks to see if any are not attached to an IAM principals reports the findings to AWS Config and S3. 
+    Performs a scan of all IAM policies in your AWS account(s), checks to see if any are not attached to IAM principals and reports the findings to AWS Config and S3.
 
-    You specify the aws accounts and other attributes via a config file.  [More info here](./cmd/orphanpolicyfinder/README.md)
+## Configuration
+
+Both solutions use the same configuration file format. You specify the AWS accounts and other attributes via a config file stored in S3. The Lambda function will route to the appropriate handler based on the AWS Config rule name that invoked it.

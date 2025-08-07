@@ -11,17 +11,3 @@ const (
 
 	DenyOnlyErrMsg string = "You must include at least one allow statement for analysis"
 )
-
-type Key struct {
-	PrimaryKey string `json:"primaryKey"`
-	SortKey    string `json:"sortKey"`
-}
-
-type AWSAccount struct {
-	AccountId string `json:"accountId"`
-	RoleArn   string `json:"roleArn"`
-}
-
-func (k *Key) ToString() string {
-	return k.PrimaryKey + "||" + k.SortKey
-}

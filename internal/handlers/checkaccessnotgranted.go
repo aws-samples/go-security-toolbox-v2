@@ -3,34 +3,48 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
-	"log"
-	"os"
 	"sync"
-	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/accessanalyzer"
+	configServiceTypes "github.com/aws/aws-sdk-go-v2/service/configservice/types"
+	configserviceclient "github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/awsclients/configservice"
+	"github.com/aws/aws-sdk-go-v2/service/configservice"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 
-	"github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/accessanalyzerapi"
-	"github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/iamapi"
-	"github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/s3api"
-	"github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/sdkapimgr"
+	accessanalyzerclient "github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/awsclients/accessanalyzer"
+	iamclient "github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/awsclients/iam"
+	s3client "github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/awsclients/s3"
+	"github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/config"
+	"github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/errors"
+	"github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/logger"
 	"github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/shared"
 	"github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/worker"
+	"github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/worker/core"
+	"github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/worker/discovery"
+	"github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/worker/errorhandling"
+	"github.com/outofoffice3/aws-samples/go-security-toolbox-v2/internal/worker/processors"
 )
 
-type Handler interface {
-	Handle(ctx context.Context, params interface{}) error
+type Handler[T any] interface {
+	Handle(ctx context.Context, params T) error
 }
 
-type _CheckAccessNotGrantedHandler struct {
-	s3Api s3api.S3Api
+// Use worker types directly
+type PolicyScanRequest = worker.PolicyScanRequest
+type PolicyScanResult = worker.PolicyScanResult
+type OrphanPolicyRequest = worker.OrphanPolicyRequest
+type OrphanPolicyResult = worker.OrphanPolicyResult
+
+type CheckAccessNotGrantedHandler struct {
+	s3Api        s3client.S3API
+	configApi    configserviceclient.ConfigServiceApi
+	logger       logger.Logger
+	config       config.ConfigManager
+	awsConfig    aws.Config
 }
 
 type CheckAccessNotGrantedEvent struct {
@@ -38,483 +52,212 @@ type CheckAccessNotGrantedEvent struct {
 }
 
 type CheckAccessNotGrantedConfig struct {
-	AWSAccounts               []shared.AWSAccount `json:"awsAccounts"`
-	PrecompliantIamIdentities []string            `json:"precompliantIamIdentities"`
-	RestrictedActions         []string            `json:"restrictedActions"`
-	TestMode                  bool                `json:"testMode"`
-	Prefix                    string              `json:"prefix"`
+	PrecompliantIamIdentities []string `json:"precompliantIamIdentities"`
+	RestrictedActions         []string `json:"restrictedActions"`
+	TestMode                  bool     `json:"testMode"`
+	Prefix                    string   `json:"prefix"`
 }
 
-func NewCheckAccessNotGrantedHandler(cfg aws.Config) (Handler, error) {
-	cangHandler := &_CheckAccessNotGrantedHandler{
-		s3Api: s3api.NewS3SDKClient(s3.NewFromConfig(cfg)),
+func NewCheckAccessNotGrantedHandler(cfg aws.Config, log logger.Logger, configMgr config.ConfigManager) (Handler[CheckAccessNotGrantedEvent], error) {
+	if log == nil {
+		log = logger.NewLogger()
+	}
+	if configMgr == nil {
+		return nil, errors.ErrConfigManagerRequired
+	}
+
+	cangHandler := &CheckAccessNotGrantedHandler{
+		s3Api:     s3client.NewS3Client(awss3.NewFromConfig(cfg)),
+		configApi: configserviceclient.NewConfigServiceApi(configservice.NewFromConfig(cfg)),
+		logger:    log,
+		config:    configMgr,
+		awsConfig: cfg,
 	}
 
 	return cangHandler, nil
 }
 
-func (cang *_CheckAccessNotGrantedHandler) Handle(ctx context.Context, params interface{}) error {
-	event, ok := params.(CheckAccessNotGrantedEvent)
-	if !ok {
-		return errors.New("type assertion failure.  event is not type checkaccessnotgranted event")
+func (cang *CheckAccessNotGrantedHandler) Handle(ctx context.Context, event CheckAccessNotGrantedEvent) error {
+	cang.logger.Info("Starting CheckAccessNotGranted scan result_token=%s", event.ConfigEvent.ResultToken)
+
+	// Load configuration
+	config, err := cang.loadConfig(ctx)
+	if err != nil {
+		cang.logger.Error("Failed to load configuration error=%v", err)
+		return err
 	}
 
-	// read environment variables for config file location
-	configBucketName := os.Getenv(shared.EnvBucketName)
-	log.Printf("config bucket name : [%s]\n", configBucketName)
-	configFileObjectKey := os.Getenv(shared.EnvConfigFileKey)
-	log.Printf("config file object key : [%s]\n", configFileObjectKey)
+	cang.logger.Debug("Configuration loaded restricted_actions=%d precompliant_identities=%d test_mode=%t", 
+		len(config.RestrictedActions), len(config.PrecompliantIamIdentities), config.TestMode)
 
-	if configBucketName == "" || configFileObjectKey == "" {
-		return errors.New("env vars not set")
+	// Create AWS clients for current account/region only
+	iamClient := iamclient.NewIAMAPI(iam.NewFromConfig(cang.awsConfig))
+	accessAnalyzer := accessanalyzerclient.NewAccessAnalyzerApi(accessanalyzer.NewFromConfig(cang.awsConfig))
+
+	// Create processor and error handler
+	processor := processors.NewPolicyScanProcessor(
+		iamClient,
+		accessAnalyzer,
+		config.RestrictedActions,
+		config.PrecompliantIamIdentities,
+		cang.logger,
+	)
+
+	errorHandler := errorhandling.NewLoggerErrorHandler(cang.logger)
+
+	// Create worker pool
+	pool := core.NewPool[PolicyScanRequest, PolicyScanResult](
+		core.PoolConfig{BufferSize: core.DefaultBufferSize},
+		processor,
+		errorHandler,
+	)
+
+	// Discover all IAM principals in current account
+	cang.logger.Debug("Starting IAM principal discovery")
+	principals, err := discovery.DiscoverIAMPrincipals(ctx, iamClient)
+	if err != nil {
+		cang.logger.Error("Failed to discover IAM principals error=%v", err)
+		return errors.ErrFailedToDiscoverPrincipals(err)
 	}
 
-	// retrieve config file from s3
-	getObjectOutput, err := cang.s3Api.GetObject(ctx, &s3.GetObjectInput{
+	cang.logger.Info("IAM principal discovery completed principals_count=%d", len(principals))
+
+	// Start pool and submit work
+	cang.logger.Debug("Starting worker pool with buffer_size=%d", core.DefaultBufferSize)
+	pool.Start(ctx)
+	submittedCount := 0
+	for _, principal := range principals {
+		if pool.Submit(principal) {
+			submittedCount++
+		} else {
+			cang.logger.Warn("Failed to submit principal to worker pool principal_arn=%s", principal.PrincipalArn)
+		}
+	}
+	cang.logger.Info("Work submission completed submitted=%d total=%d", submittedCount, len(principals))
+
+	// Process results
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Handle results
+	resultCount := 0
+	go func() {
+		defer wg.Done()
+		for result := range pool.Results() {
+			resultCount++
+			cang.logger.Debug("Processing scan result principal_arn=%s compliance=%s result_count=%d", 
+				result.PrincipalArn, result.ComplianceStatus, resultCount)
+			
+			evaluation := cang.createConfigEvaluation(result, event.ConfigEvent.ResultToken)
+			if !config.TestMode {
+				cang.sendToConfigService(ctx, evaluation)
+			} else {
+				cang.logger.Debug("Test mode enabled - skipping Config service submission")
+			}
+		}
+		cang.logger.Info("Result processing completed total_results=%d", resultCount)
+	}()
+
+	// Handle errors
+	errorCount := 0
+	go func() {
+		defer wg.Done()
+		for err := range pool.Errors() {
+			errorCount++
+			cang.logger.Error("Policy scan processing error error_count=%d error=%v", errorCount, err)
+		}
+		if errorCount > 0 {
+			cang.logger.Warn("Scan completed with errors total_errors=%d", errorCount)
+		}
+	}()
+
+	pool.Stop()
+	wg.Wait()
+
+	cang.logger.Info("CheckAccessNotGranted scan completed successfully principals_processed=%d results=%d errors=%d", 
+		len(principals), resultCount, errorCount)
+	return nil
+}
+
+func (cang *CheckAccessNotGrantedHandler) loadConfig(ctx context.Context) (CheckAccessNotGrantedConfig, error) {
+	configBucketName := cang.config.GetConfigBucketName()
+	configFileObjectKey := cang.config.GetConfigFileKey()
+	cang.logger.Debug("Loading configuration from S3 bucket=%s key=%s", configBucketName, configFileObjectKey)
+
+	getObjectOutput, err := cang.s3Api.GetObject(ctx, &awss3.GetObjectInput{
 		Bucket: aws.String(configBucketName),
 		Key:    aws.String(configFileObjectKey),
 	})
-	// return errors
 	if err != nil {
-		return err
+		cang.logger.Error("Failed to retrieve config from S3 bucket=%s key=%s error=%v", configBucketName, configFileObjectKey, err)
+		return CheckAccessNotGrantedConfig{}, errors.ErrFailedToGetConfigFromS3(err)
+	}
+	defer getObjectOutput.Body.Close()
+
+	objectContent, err := io.ReadAll(getObjectOutput.Body)
+	if err != nil {
+		cang.logger.Error("Failed to read config content error=%v", err)
+		return CheckAccessNotGrantedConfig{}, errors.ErrFailedToReadConfigContent(err)
 	}
 
 	var config CheckAccessNotGrantedConfig
-	objectContent, err := io.ReadAll(getObjectOutput.Body)
-	// return errors
-	if err != nil {
-		return err
-	}
-	log.Printf("config file content : [%s]\n", string(objectContent))
-
 	err = json.Unmarshal(objectContent, &config)
-	// return errors
 	if err != nil {
-		return err
+		cang.logger.Error("Failed to unmarshal config JSON error=%v", err)
+		return CheckAccessNotGrantedConfig{}, errors.ErrFailedToUnmarshalConfig(err)
 	}
-	log.Printf("config file unmarshalled : [%+v]\n", config)
 
-	// check if restricted actions are valid
+	cang.logger.Debug("Config unmarshaled successfully - starting validation")
+
+	// Validate restricted actions
 	if len(config.RestrictedActions) == 0 {
-		return errors.New("restricted actions are empty")
+		cang.logger.Error("Configuration validation failed - no restricted actions specified")
+		return CheckAccessNotGrantedConfig{}, errors.ErrRestrictedActionsEmpty
 	}
 
-	for _, restrictedAction := range config.RestrictedActions {
+	for i, restrictedAction := range config.RestrictedActions {
 		if !shared.IsValidAction(restrictedAction) {
-			return errors.New("restricted action(s) are invalid: " + restrictedAction)
-		}
-	}
-	log.Printf("restricted actions : [%+v]\n", config.RestrictedActions)
-
-	// check if precompliant iam identities are valid
-	for _, precompliantIamIdentity := range config.PrecompliantIamIdentities {
-		if precompliantIamIdentity == "" {
-			log.Println("precompliant iam identity is empty...skipping")
-			continue
-		}
-		if !shared.IsValidIamIdentityArn(precompliantIamIdentity) {
-			return errors.New("precompliant iam identity(s) are invalid: " + precompliantIamIdentity)
+			cang.logger.Error("Invalid restricted action at index=%d action=%s", i, restrictedAction)
+			return CheckAccessNotGrantedConfig{}, errors.ErrInvalidRestrictedAction(restrictedAction)
 		}
 	}
 
-	// create a map of precompliant policy arns
-	preCompliantIamIdentites := make(map[string]bool)
-	for _, precompliantIamIdentity := range config.PrecompliantIamIdentities {
-		preCompliantIamIdentites[precompliantIamIdentity] = true
-	}
-
-	// ensure all keys for map equal true
-	for key, value := range preCompliantIamIdentites {
-		if !value {
-			return errors.New("precompliant iam identities map was not initialized correctly: [" + key + " ]")
+	// Validate precompliant identities
+	for i, precompliantIamIdentity := range config.PrecompliantIamIdentities {
+		if precompliantIamIdentity != "" && !shared.IsValidIamIdentityArn(precompliantIamIdentity) {
+			cang.logger.Error("Invalid precompliant IAM identity at index=%d identity=%s", i, precompliantIamIdentity)
+			return CheckAccessNotGrantedConfig{}, errors.ErrInvalidPrecompliantIdentity(precompliantIamIdentity)
 		}
 	}
-	log.Println("precompliant iam identities validated")
 
-	// check if test mode is enabled
+	cang.logger.Info("Configuration validation completed successfully restricted_actions=%d precompliant_identities=%d", 
+		len(config.RestrictedActions), len(config.PrecompliantIamIdentities))
+	return config, nil
+}
 
-	var (
-		batchErrors               = make([]error, 0)
-		errorChan                 = make(chan error, 1)
-		errorCsvWorkerRequestChan = make(chan interface{}, 1)
-		errorCsvWorkerErrorChan   = make(chan error, 1)
-	)
-
-	// load aws config
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion("us-east-1"),
-		awsconfig.WithRetryMode(aws.RetryModeStandard),
-		awsconfig.WithRetryMaxAttempts(3))
-
-	// return errors
-	if err != nil {
-		return err
+func (cang *CheckAccessNotGrantedHandler) createConfigEvaluation(result PolicyScanResult, resultToken string) configServiceTypes.Evaluation {
+	return configServiceTypes.Evaluation{
+		ComplianceResourceId:   aws.String(result.PrincipalArn),
+		ComplianceResourceType: aws.String(result.PrincipalType),
+		ComplianceType:         result.ComplianceStatus,
+		Annotation:             aws.String(result.Annotation),
+		OrderingTimestamp:      aws.Time(result.Timestamp),
 	}
+}
 
-	// initalize aws client manager
-	awsClientMgr, err := sdkapimgr.InitAwsClientMgr(sdkapimgr.SDKApiMgrConfig{
-		Cfg:           cfg,
-		MainAccountId: event.ConfigEvent.AccountID,
-		AwsAccounts:   config.AWSAccounts,
+func (cang *CheckAccessNotGrantedHandler) sendToConfigService(ctx context.Context, evaluation configServiceTypes.Evaluation) {
+	resourceId := aws.ToString(evaluation.ComplianceResourceId)
+	resourceType := aws.ToString(evaluation.ComplianceResourceType)
+	
+	cang.logger.Debug("Sending evaluation to Config service resource_id=%s resource_type=%s compliance=%s", 
+		resourceId, resourceType, evaluation.ComplianceType)
+	
+	_, err := cang.configApi.PutEvaluations(ctx, &configservice.PutEvaluationsInput{
+		Evaluations: []configServiceTypes.Evaluation{evaluation},
 	})
-	// return error
 	if err != nil {
-		return err
+		cang.logger.Error("Failed to send evaluation to Config service resource_id=%s error=%v", resourceId, err)
+	} else {
+		cang.logger.Debug("Successfully sent evaluation to Config service resource_id=%s", resourceId)
 	}
-
-	now := time.Now()
-	year, month, day := now.Year(), now.Month(), now.Day()
-	hour, minute, second := now.Hour(), now.Minute(), now.Second()
-	timestampPrefix := fmt.Sprintf("year=%d/month=%02d/day=%02d/%02d"+"-%02d"+"-%02d-", year, month, day, hour, minute, second)
-
-	// process errors from error channel
-	errorCsvWorker, err := worker.NewCSVWorker(worker.CsvWorkerConfig{
-		AccountId: event.ConfigEvent.AccountID,
-		WorkerConfig: worker.WorkerConfig{
-			Ctx:          ctx,
-			Id:           "error csv worker",
-			Wg:           new(sync.WaitGroup),
-			RequestChan:  errorCsvWorkerRequestChan,
-			ErrorChan:    errorCsvWorkerErrorChan,
-			SdkClientMgr: awsClientMgr,
-		},
-		OutputConfig: worker.OutputConfiguration{
-			Headers:    []string{"error"},
-			Filename:   "errors/" + timestampPrefix + "errors.csv",
-			Prefix:     config.Prefix,
-			BucketName: configBucketName,
-			WriteLocal: false,
-			Writes3:    true,
-		},
-	})
-	// return errors
-	if err != nil {
-		return err
-	}
-
-	// process errors from error channel
-	errorCsvWorkerErrorWg := new(sync.WaitGroup)
-	errorCsvWorkerErrorWg.Add(1)
-	go func() {
-		defer errorCsvWorkerErrorWg.Done()
-		for err := range errorChan {
-			batchErrors = append(batchErrors, err)
-		}
-		if len(batchErrors) > 0 {
-			log.Printf("errors from error worker : [%+v]\n", batchErrors)
-			return
-		}
-	}()
-
-	errorWorkerWg := new(sync.WaitGroup)
-	errorWorkerWg.Add(1)
-	go func() {
-		defer errorWorkerWg.Done()
-		for err := range errorChan {
-			log.Printf("error from main threads error channel: [%s]\n", err.Error())
-			errorCsvWorkerRequestChan <- worker.CsvWorkerRequest{
-				CsvRecord: []string{err.Error()},
-			}
-		}
-	}()
-
-	// create config evaluation worker
-	var (
-		configEvaluationWorkerRequestChan    = make(chan interface{}, 1)
-		configEvaluationCsvWorkerRequestChan = make(chan interface{}, 1)
-	)
-
-	configEvaluationWorker, err := worker.NewConfigEvaluationWorker(worker.ConfigEvaluationWorkerConfig{
-		AccountId:        event.ConfigEvent.AccountID,
-		ResultToken:      event.ConfigEvent.ResultToken,
-		TestMode:         config.TestMode,
-		CsvWorkerEnabled: true,
-		CsvWorkerConfig: worker.CsvWorkerConfig{
-			AccountId: event.ConfigEvent.AccountID,
-			WorkerConfig: worker.WorkerConfig{
-				Ctx:          ctx,
-				Id:           "config evaluation csv worker",
-				Wg:           new(sync.WaitGroup),
-				RequestChan:  configEvaluationCsvWorkerRequestChan,
-				ErrorChan:    errorChan,
-				SdkClientMgr: awsClientMgr,
-			},
-			OutputConfig: worker.OutputConfiguration{
-				Headers: []string{"Resource Id",
-					"Resource Type",
-					"Compliance Status",
-					"Annotation",
-					"Timestamp",
-				},
-				Filename:   "results/" + timestampPrefix + "results.csv",
-				Prefix:     config.Prefix,
-				BucketName: configBucketName,
-				WriteLocal: false,
-				Writes3:    true,
-			},
-		},
-		WorkerConfig: worker.WorkerConfig{
-			Ctx:          ctx,
-			Id:           "config evaluation worker",
-			Wg:           new(sync.WaitGroup),
-			RequestChan:  configEvaluationWorkerRequestChan,
-			ErrorChan:    errorChan,
-			SdkClientMgr: awsClientMgr,
-		},
-	})
-	// return errors
-	if err != nil {
-		return err
-	}
-
-	// create custom policy scan worker
-	var (
-		customPolicyScanWorkerRequestChan = make(chan interface{}, 1)
-		semaphoreChan                     = make(chan chan interface{}, 3)
-		eventTime                         = time.Now()
-	)
-
-	customPolicyScanWorker, err := worker.NewCustomPolicyScanWorker(worker.CustomPolicyScanWorkerConfig{
-		RestrictedActions:    config.RestrictedActions,
-		ConfigEvaluationChan: configEvaluationWorkerRequestChan,
-		SemaphoreChan:        semaphoreChan,
-		EventTime:            eventTime,
-		EnableCache:          true,
-		WorkerConfig: worker.WorkerConfig{
-			Ctx:          ctx,
-			Id:           "custom policy scan worker",
-			Wg:           new(sync.WaitGroup),
-			RequestChan:  customPolicyScanWorkerRequestChan,
-			ErrorChan:    errorChan,
-			SdkClientMgr: awsClientMgr,
-		},
-	})
-	// return errors
-	if err != nil {
-		return err
-	}
-
-	executionWg := new(sync.WaitGroup)
-	for _, awsAccount := range config.AWSAccounts {
-		executionWg.Add(1)
-		go cang.checkAccessNotGrantedByAccount(CheckAccessNotGrantedByAccountInput{
-			wg:                        executionWg,
-			accountId:                 awsAccount.AccountId,
-			awsClientMgr:              awsClientMgr,
-			errorChan:                 errorChan,
-			workerRequestChan:         customPolicyScanWorkerRequestChan,
-			precompliantIamIdentities: preCompliantIamIdentites,
-		})
-	}
-
-	executionWg.Wait() // wait for go routines to complete
-	log.Printf("checkaccessnotgrantedbyaccount go routines successfully sent all requests\n")
-	close(customPolicyScanWorkerRequestChan) // close request channel
-	log.Printf("custom policy scan worker request channel closed\n")
-	customPolicyScanWorker.Worker.Wait() // wait for custom policy scan workers to complete
-	log.Printf("custom policy scan worker completed\n")
-
-	// wait for config evaluation worker
-	close(configEvaluationWorkerRequestChan)
-	log.Printf("config evaluation worker request channel closed\n")
-	configEvaluationWorker.Worker.Wait()
-	log.Printf("config evalation worker completed\n")
-
-	// wait for error worker
-	close(errorChan)
-	log.Printf("main thread error channel closed\n")
-	close(errorCsvWorkerRequestChan)
-	log.Printf("error csv worker request channel closed\n")
-
-	errorWorkerWg.Wait()
-	log.Printf("main thread error go routine completed\n")
-	errorCsvWorker.Worker.Wait()
-	log.Printf("error csv worker go routine completed\n")
-
-	close(errorCsvWorkerErrorChan)
-	log.Printf("error csv worker error channel closed\n")
-	errorCsvWorkerErrorWg.Wait()
-	log.Printf("error csv worker error go routine completed\n")
-
-	return nil
-}
-
-type CheckAccessNotGrantedByAccountInput struct {
-	wg                        *sync.WaitGroup
-	accountId                 string
-	awsClientMgr              sdkapimgr.SdkApiMgr
-	errorChan                 chan error
-	workerRequestChan         chan interface{}
-	precompliantIamIdentities map[string]bool
-}
-
-func (cang *_CheckAccessNotGrantedHandler) checkAccessNotGrantedByAccount(input CheckAccessNotGrantedByAccountInput) {
-	log.Printf("checkaccessnotgranted start for account [%s]\n", input.accountId)
-	defer input.wg.Done()
-	// retrieve sdk clients from sdk client manager interface
-	result, ok := input.awsClientMgr.GetApi(input.accountId, sdkapimgr.IamService)
-	if !ok {
-		log.Printf("error retrieving iam client from sdk client manager interface")
-		input.errorChan <- errors.New("error retrieving iam client from sdk client manager interface")
-	}
-	iamApi, ok := result.(iamapi.IamApi)
-	if !ok {
-		log.Printf("error type assertion for iam client")
-		input.errorChan <- errors.New("error type assertion for iam client")
-	}
-
-	result, ok = input.awsClientMgr.GetApi(input.accountId, sdkapimgr.AccessAnalyzerService)
-	if !ok {
-		log.Printf("error retrieving access analyzer client from sdk client manager interface")
-		input.errorChan <- errors.New("error retrieving access analyzer client from sdk client manager interface")
-	}
-	accessAnalyzerApi, ok := result.(accessanalyzerapi.AccessAnalyzerApi)
-	if !ok {
-		log.Printf("error type assertion for access analyzer client")
-		input.errorChan <- errors.New("error type assertion for access analyzer client")
-	}
-
-	roleWg := new(sync.WaitGroup)
-	roleWg.Add(1)
-	go func() {
-		defer roleWg.Done()
-		err := iamRoleCheckAccessNotGranted(iamRoleCheckAccessNotGrantedInput{
-			accountId:                 input.accountId,
-			iamClient:                 iamApi,
-			accessAnalyzer:            accessAnalyzerApi,
-			workerRequestChan:         input.workerRequestChan,
-			precompliantIamIdentities: input.precompliantIamIdentities,
-		})
-		if err != nil {
-			log.Printf("error checking role access : %v", err)
-			input.errorChan <- errors.New("error checking role access : [%v]")
-		}
-	}()
-
-	userWg := new(sync.WaitGroup)
-	userWg.Add(1)
-	go func() {
-		defer userWg.Done()
-		err := iamUserCheckAccessNotGranted(iamUserCheckAccessNotGrantedInput{
-			accountId:                 input.accountId,
-			iamClient:                 iamApi,
-			accessAnalyzer:            accessAnalyzerApi,
-			workerRequestChan:         input.workerRequestChan,
-			precompliantIamIdentities: input.precompliantIamIdentities,
-		})
-		if err != nil {
-			log.Printf("error checking user access : %v", err)
-			input.errorChan <- errors.New("error checking user access : [%v]")
-		}
-	}()
-
-	// wait for go routines to complete
-	roleWg.Wait()
-	userWg.Wait()
-	log.Printf("finished checking access for account [%s]\n", input.accountId)
-}
-
-type iamRoleCheckAccessNotGrantedInput struct {
-	accountId                 string
-	iamClient                 iamapi.IamApi
-	accessAnalyzer            accessanalyzerapi.AccessAnalyzerApi
-	workerRequestChan         chan interface{}
-	precompliantIamIdentities map[string]bool
-}
-
-func iamRoleCheckAccessNotGranted(input iamRoleCheckAccessNotGrantedInput) error {
-	log.Printf("processing roles for account [%s]\n", input.accountId)
-	if input.workerRequestChan == nil {
-		log.Printf("worker request channel is nil...exiting\n")
-		return errors.New("worker request channel is nil")
-	}
-	listRolesPaginator := iam.NewListRolesPaginator(input.iamClient, &iam.ListRolesInput{})
-	for listRolesPaginator.HasMorePages() {
-		listRolesOutput, err := listRolesPaginator.NextPage(context.TODO())
-		if err != nil {
-			log.Printf("error listing roles : %v", err)
-			return errors.New("error listing roles : [%v]")
-		}
-		for _, role := range listRolesOutput.Roles {
-			// send request to worker
-			iamIdentity, err := worker.NewIamIdentity(worker.IamIdentityConfig{
-				IdentityType: shared.AwsIamRole,
-				Arn:          *role.Arn,
-				Name:         *role.RoleName,
-			})
-			// return errors
-			if err != nil {
-				return err
-			}
-
-			request := worker.CustomPolicyScanWorkerRequest{
-				AccountId:                      input.accountId,
-				ResourceType:                   shared.AwsIamRole,
-				IamIdentity:                    iamIdentity,
-				IamApi:                         input.iamClient,
-				AccessAnalyzerApi:              input.accessAnalyzer,
-				PrecompliantIamIdentityRequest: false,
-			}
-
-			// if role is precompliant, send precompliant request
-			if input.precompliantIamIdentities[*role.Arn] {
-				request.PrecompliantIamIdentityRequest = true
-			}
-
-			input.workerRequestChan <- request // send request to worker
-		}
-	}
-	return nil
-}
-
-type iamUserCheckAccessNotGrantedInput struct {
-	accountId                 string
-	iamClient                 iamapi.IamApi
-	accessAnalyzer            accessanalyzerapi.AccessAnalyzerApi
-	workerRequestChan         chan interface{}
-	precompliantIamIdentities map[string]bool
-}
-
-func iamUserCheckAccessNotGranted(input iamUserCheckAccessNotGrantedInput) error {
-	log.Printf("processing users for account [%s]\n", input.accountId)
-	if input.workerRequestChan == nil {
-		log.Println("worker request channel is nil...exiting")
-		return errors.New("worker request channel is nil")
-	}
-	listUsersPaginator := iam.NewListUsersPaginator(input.iamClient, &iam.ListUsersInput{})
-	for listUsersPaginator.HasMorePages() {
-		listUsersOutput, err := listUsersPaginator.NextPage(context.TODO())
-		if err != nil {
-			log.Printf("error listing users : %v", err)
-			return errors.New("error listing users : [%v]")
-		}
-		for _, user := range listUsersOutput.Users {
-			// send request to worker
-			iamIdentity, err := worker.NewIamIdentity(worker.IamIdentityConfig{
-				IdentityType: shared.AwsIamUser,
-				Arn:          *user.Arn,
-				Name:         *user.UserName,
-			})
-			// return errors
-			if err != nil {
-				return err
-			}
-
-			request := worker.CustomPolicyScanWorkerRequest{
-				AccountId:                      input.accountId,
-				ResourceType:                   shared.AwsIamUser,
-				IamIdentity:                    iamIdentity,
-				IamApi:                         input.iamClient,
-				AccessAnalyzerApi:              input.accessAnalyzer,
-				PrecompliantIamIdentityRequest: false,
-			}
-
-			// if user is precompliant, send precompliant request
-			if input.precompliantIamIdentities[*user.Arn] {
-				request.PrecompliantIamIdentityRequest = true
-			}
-
-			input.workerRequestChan <- request // send request to worker
-		}
-	}
-	return nil
 }

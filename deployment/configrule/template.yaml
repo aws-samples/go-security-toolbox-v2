@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  go-security-toolbox-v2
+  
+  AWS SAM Template for unified security toolbox Lambda with multiple config rules.
+
+Globals:
+  Function:
+    Timeout: 600
+    MemorySize: 256
+
+Resources:
+  SecurityToolboxLambda:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: go1.x
+    Properties:
+      FunctionName: go-security-toolbox-v2
+      CodeUri: ../../cmd/configrule
+      Handler: bootstrap
+      Runtime: provided.al2023
+      ReservedConcurrentExecutions: 1
+      Architectures:
+        - arm64
+      Environment:
+        Variables:
+          CONFIG_FILE_BUCKET_NAME: security-toolbox-config-bucket
+          CONFIG_FILE_KEY: config.json
+      Policies:
+        Statement:
+          - Sid: "cloudWatchLogs"
+            Effect: "Allow"
+            Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource: "*"
+
+          - Sid: "s3BucketAccess"
+            Effect: "Allow"
+            Action: 
+              - "s3:GetObject"
+              - "s3:PutObject"
+            Resource: "*"
+
+          - Sid: "iamActions"
+            Effect: "Allow"
+            Action: 
+              - "iam:ListUsers"
+              - "iam:ListAttachedUserPolicies"
+              - "iam:ListUserPolicies"
+              - "iam:GetUserPolicy"
+              - "iam:ListRoles"
+              - "iam:ListAttachedRolePolicies"
+              - "iam:ListRolePolicies"
+              - "iam:GetRolePolicy"
+              - "iam:GetPolicy"
+              - "iam:GetPolicyVersion"
+              - "iam:ListPolicies"
+              - "iam:ListEntitiesForPolicy"
+              - "access-analyzer:CheckAccessNotGranted"
+            Resource: "*"
+
+          - Sid: "stsActions"
+            Effect: "Allow"
+            Action: 
+              - "sts:AssumeRole" 
+            Resource: "*"
+
+          - Sid: "configActions"
+            Effect: "Allow"
+            Action: 
+              - "config:PutEvaluations"
+            Resource: "*" 
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SecurityToolboxLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: config.amazonaws.com
+   
+  CheckAccessNotGrantedConfigRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: check-access-not-granted
+      Description: Scans IAM principals to see if they contain any restricted actions
+      Source:
+        SourceIdentifier: !GetAtt SecurityToolboxLambda.Arn
+        Owner: CUSTOM_LAMBDA
+        SourceDetails:
+          - EventSource: aws.config
+            MessageType: ScheduledNotification
+      MaximumExecutionFrequency: TwentyFour_Hours
+
+  OrphanPolicyFinderConfigRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: orphan-policy-finder
+      Description: Scans IAM policies to find orphaned policies not attached to any principal
+      Source:
+        SourceIdentifier: !GetAtt SecurityToolboxLambda.Arn
+        Owner: CUSTOM_LAMBDA
+        SourceDetails:
+          - EventSource: aws.config
+            MessageType: ScheduledNotification
+      MaximumExecutionFrequency: TwentyFour_Hours
+
+Outputs:
+  SecurityToolboxLambda:
+    Description: "Lambda Function ARN"
+    Value: !GetAtt SecurityToolboxLambda.Arn
+  CheckAccessNotGrantedRule:
+    Description: "Check Access Not Granted Config Rule"
+    Value: !Ref CheckAccessNotGrantedConfigRule
+  OrphanPolicyFinderRule:
+    Description: "Orphan Policy Finder Config Rule"
+    Value: !Ref OrphanPolicyFinderConfigRule

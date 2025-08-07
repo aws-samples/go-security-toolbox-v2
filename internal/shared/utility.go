@@ -7,6 +7,9 @@ import (
 
 // ExtractAWSAccountFromARN takes an ARN and returns the AWS account number.
 func ExtractAWSAccountFromARN(arn string) (string, error) {
+	if arn == "" {
+		return "", fmt.Errorf("ARN cannot be empty")
+	}
 	parts := strings.Split(arn, ":")
 	if len(parts) < 6 {
 		return "", fmt.Errorf("invalid ARN: expected at least 6 parts, got %d", len(parts))
