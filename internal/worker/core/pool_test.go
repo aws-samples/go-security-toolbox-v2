@@ -200,7 +200,14 @@ func TestPool_StartAndStop(t *testing.T) {
 }
 
 func TestPool_Submit(t *testing.T) {
-	processor := &mockProcessor{}
+	// Use a blocking processor to ensure buffer fills up
+	blockChan := make(chan struct{})
+	processor := &mockProcessor{
+		processFunc: func(ctx context.Context, input string) (string, error) {
+			<-blockChan // Block until we signal
+			return "processed-" + input, nil
+		},
+	}
 	errorHandler := &mockErrorHandler{}
 	config := PoolConfig{
 		WorkerCount: intPtr(1),
@@ -210,7 +217,10 @@ func TestPool_Submit(t *testing.T) {
 	pool := NewPool[string, string](config, processor, errorHandler)
 	ctx := context.Background()
 	pool.Start(ctx)
-	defer pool.Stop()
+	defer func() {
+		close(blockChan) // Unblock processor
+		pool.Stop()
+	}()
 
 	tests := []struct {
 		name     string

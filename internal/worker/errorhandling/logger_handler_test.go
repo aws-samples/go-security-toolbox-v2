@@ -100,11 +100,11 @@ func TestLoggerErrorHandler_HandleError(t *testing.T) {
 			
 			// Verify error was logged
 			assert.Len(t, mockLog.errorCalls, 1)
-			assert.Contains(t, mockLog.errorCalls[0].format, "Policy scan error")
+			assert.Contains(t, mockLog.errorCalls[0].format, "Worker processing failed")
 			
 			// Verify debug was logged
 			assert.Len(t, mockLog.debugCalls, 1)
-			assert.Contains(t, mockLog.debugCalls[0].format, "Error CSV record")
+			assert.Contains(t, mockLog.debugCalls[0].format, "Error record formatted")
 		})
 	}
 }
