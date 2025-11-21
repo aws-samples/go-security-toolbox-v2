@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -30,7 +31,7 @@ func TestRouteConfigRuleUnsupported(t *testing.T) {
 
 	// Test with empty AWS config - will fail at config loading but tests routing logic
 	var cfg aws.Config
-	err := RouteConfigRule(nil, event, cfg)
+	err := RouteConfigRule(context.TODO(), event, cfg)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported config rule")
 }
